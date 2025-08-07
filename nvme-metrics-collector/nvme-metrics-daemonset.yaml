@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvme-metrics-collector
+  namespace: default
+  labels:
+    app: nvme-metrics-collector
+spec:
+  selector:
+    matchLabels:
+      app: nvme-metrics-collector
+  template:
+    metadata:
+      labels:
+        app: nvme-metrics-collector
+    spec:
+      # Esegui sui nodi Linux
+      nodeSelector:
+        kubernetes.io/os: linux
+      # Tolleranza per eseguire su tutti i tipi di nodi, inclusi i master
+      tolerations:
+      - operator: Exists
+      # Esegui il pod nello spazio dei nomi di rete dell'host
+      hostNetwork: true
+      # Esegui il pod nello spazio dei nomi PID dell'host
+      hostPID: true
+      containers:
+      - name: metrics-collector
+        # Immagine base. Debian è una scelta solida.
+        image: debian:bullseye-slim
+        # Esegui come container privilegiato per accedere ai dispositivi e ai dati del kernel
+        securityContext:
+          privileged: true
+        # Comando per installare i tool e lanciare lo script
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            apt-get update && apt-get install -y procps sysstat iproute2 ethtool && \
+            echo "Installazione completata." && \
+            /scripts/collect-metrics.sh
+        # Monta lo script dal ConfigMap
+        volumeMounts:
+        - name: script-volume
+          mountPath: /scripts/collect-metrics.sh
+          subPath: collect-metrics.sh
+        # Monta la root del filesystem dell'host per accedere a /proc, /sys, ecc.
+        - name: host-root
+          mountPath: /host
+          readOnly: true
+      volumes:
+      - name: script-volume
+        configMap:
+          name: nvme-collector-script
+          # Rende lo script eseguibile
+          defaultMode: 0755
+      - name: host-root
+        hostPath:
+          path: /
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvme-collector-script
+  namespace: default
+data:
+  collect-metrics.sh: |
+    #!/bin/bash
+
+    # Imposta il chroot sulla root dell'host per far funzionare i comandi come se fossero sull'host
+    chroot /host /bin/bash <<'EOF'
+
+    # Intervallo di raccolta in secondi
+    COLLECTION_INTERVAL=30
+
+    echo "Avvio dello script di raccolta metriche per NVMe-TCP (all'interno del chroot)..."
+
+    while true; do
+        echo "========================================================================="
+        echo "RACCOLTA METRICHE - $(date)"
+        echo "========================================================================="
+
+        echo "\n### 1. STATISTICHE DI SISTEMA (CPU e Memoria) ###"
+        echo "--- CPU (vmstat 1 2) ---"
+        vmstat 1 2
+        echo "\n--- Memoria (free -h) ---"
+        free -h
+
+        echo "\n### 2. STATISTICHE I/O (iostat) ###"
+        echo "--- iostat -d -x -k 1 2 ---"
+        iostat -d -x -k -N 1 2
+
+        echo "\n### 3. STATISTICHE DI RETE (ip & ss) ###"
+        echo "--- Interfacce di rete (contatori) ---"
+        ip -s link
+
+        echo "\n--- Statistiche riassuntive TCP (ss -s) ---"
+        ss -s
+
+        echo "\n--- Dettagli connessioni TCP (ss -tin) ---"
+        ss -tin
+
+        echo "\n### 4. PARAMETRI KERNEL (/sys) ###"
+        echo "--- Parametri NVMe Core (/sys/module/nvme_core/parameters/) ---"
+        if [ -d /sys/module/nvme_core/parameters/ ]; then
+            for param in /sys/module/nvme_core/parameters/*; do
+                echo -n "nvme_core: $(basename "$param") = "
+                cat "$param"
+            done
+        else
+            echo "Modulo nvme_core non trovato o parametri non disponibili in /sys."
+        fi
+
+        echo "\n--- Parametri NVMe TCP (/sys/module/nvme_tcp/parameters/) ---"
+        if [ -d /sys/module/nvme_tcp/parameters/ ]; then
+            for param in /sys/module/nvme_tcp/parameters/*; do
+                echo -n "nvme_tcp: $(basename "$param") = "
+                cat "$param"
+            done
+        else
+            echo "Modulo nvme_tcp non trovato o parametri non disponibili in /sys."
+        fi
+
+        echo "\n--- Alcuni parametri di rete importanti (sysctl) ---"
+        sysctl net.core.rmem_max \
+               net.core.wmem_max \
+               net.ipv4.tcp_rmem \
+               net.ipv4.tcp_wmem \
+               net.ipv4.tcp_congestion_control \
+               net.core.netdev_max_backlog
+
+        echo "\n========================================================================="
+        echo "Raccolta completata. Prossima raccolta tra $COLLECTION_INTERVAL secondi."
+        sleep $COLLECTION_INTERVAL
+    done
+    EOF
