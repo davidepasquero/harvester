@@ -1,0 +1,23 @@
+# --- Configurazione per la clonazione della VM ---
+# Modificare i valori sottostanti prima di eseguire lo script clona_vm.sh
+
+# -- VM di Origine --
+SOURCE_NS="k8s-enti-prod01"
+SOURCE_VM="k8sw01-enti-prod01"
+
+# -- VM di Destinazione --
+# Modificare questo valore con il namespace/nome della nuova VM
+DEST_NS="k8s-enti-prod02"
+
+# -- Nuova Configurazione di Rete --
+# IP per la prima interfaccia (eth0/enp1s0)
+NEW_IP_1="10.138.155.5/26"
+# Gateway per la prima interfaccia (eth0/enp1s0)
+NEW_GW_1="10.138.155.1"
+# IP per la seconda interfaccia (eth1/enp2s0)
+NEW_IP_2="10.138.151.68/25"
+# Gateway per la rotta della seconda interfaccia (eth1/enp2s0).
+# Lasciare vuoto per mantenere 'on-link: true'. Compilare per usare 'via: <gateway>'.
+NEW_GW_2=""
+# Prefisso del sito per il dominio di ricerca (es. site01, site02)
+NEW_SITE_PREFIX="site01"

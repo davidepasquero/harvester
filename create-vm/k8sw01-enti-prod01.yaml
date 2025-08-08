@@ -1,0 +1,298 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  annotations:
+    harvesterhci.io/vmRunStrategy: RerunOnFailure
+    harvesterhci.io/volumeClaimTemplates: >-
+      [{"metadata":{"name":"k8sw01-enti-prod01-disk-0-dpc4m","annotations":{"harvesterhci.io/imageId":"default/image-p6rcv"}},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"50Gi"}},"volumeMode":"Block","storageClassName":"ontap-san-nvme"}},{"metadata":{"name":"k8sw01-enti-prod01-disk-1-93bxn"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"150Gi"}},"volumeMode":"Block","storageClassName":"ontap-san-nvme"}},{"metadata":{"name":"k8sw01-enti-prod01-disk-2-agpdv"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"50Gi"}},"volumeMode":"Block","storageClassName":"ontap-san-nvme"}}]
+    kubevirt.io/latest-observed-api-version: v1
+    kubevirt.io/storage-observed-api-version: v1
+    network.harvesterhci.io/ips: '[]'
+  creationTimestamp: '2025-08-07T14:20:11Z'
+  finalizers:
+    - kubevirt.io/virtualMachineControllerFinalize
+    - wrangler.cattle.io/VMController.CleanupPVCAndSnapshot
+  generation: 4
+  labels:
+    harvesterhci.io/creator: harvester
+    harvesterhci.io/os: linux
+  managedFields:
+    - apiVersion: kubevirt.io/v1
+      fieldsType: FieldsV1
+      fieldsV1:
+        f:metadata:
+          f:annotations:
+            f:kubevirt.io/latest-observed-api-version: {}
+            f:kubevirt.io/storage-observed-api-version: {}
+          f:finalizers:
+            .: {}
+            v:"kubevirt.io/virtualMachineControllerFinalize": {}
+      manager: virt-controller
+      operation: Update
+      time: '2025-08-07T14:20:12Z'
+    - apiVersion: kubevirt.io/v1
+      fieldsType: FieldsV1
+      fieldsV1:
+        f:metadata:
+          f:annotations:
+            .: {}
+            f:harvesterhci.io/vmRunStrategy: {}
+            f:harvesterhci.io/volumeClaimTemplates: {}
+            f:network.harvesterhci.io/ips: {}
+          f:finalizers:
+            v:"wrangler.cattle.io/VMController.CleanupPVCAndSnapshot": {}
+          f:labels:
+            .: {}
+            f:harvesterhci.io/creator: {}
+            f:harvesterhci.io/os: {}
+        f:spec:
+          .: {}
+          f:runStrategy: {}
+          f:template:
+            .: {}
+            f:metadata:
+              .: {}
+              f:annotations:
+                .: {}
+                f:harvesterhci.io/sshNames: {}
+              f:labels:
+                .: {}
+                f:guestcluster.harvesterhci.io/name: {}
+                f:harvesterhci.io/vmName: {}
+            f:spec:
+              .: {}
+              f:affinity:
+                .: {}
+                f:nodeAffinity:
+                  f:preferredDuringSchedulingIgnoredDuringExecution: {}
+                f:podAffinity:
+                  .: {}
+                  f:preferredDuringSchedulingIgnoredDuringExecution: {}
+                  f:requiredDuringSchedulingIgnoredDuringExecution: {}
+                f:podAntiAffinity:
+                  .: {}
+                  f:preferredDuringSchedulingIgnoredDuringExecution: {}
+                  f:requiredDuringSchedulingIgnoredDuringExecution: {}
+              f:domain:
+                .: {}
+                f:cpu:
+                  .: {}
+                  f:cores: {}
+                  f:sockets: {}
+                  f:threads: {}
+                f:devices:
+                  .: {}
+                  f:disks: {}
+                  f:inputs: {}
+                  f:interfaces: {}
+                f:features:
+                  .: {}
+                  f:acpi:
+                    .: {}
+                    f:enabled: {}
+                f:machine:
+                  .: {}
+                  f:type: {}
+                f:resources:
+                  .: {}
+                  f:limits:
+                    .: {}
+                    f:cpu: {}
+                    f:memory: {}
+              f:evictionStrategy: {}
+              f:hostname: {}
+              f:networks: {}
+              f:terminationGracePeriodSeconds: {}
+              f:volumes: {}
+      manager: harvester
+      operation: Update
+      time: '2025-08-07T15:46:10Z'
+    - apiVersion: kubevirt.io/v1
+      fieldsType: FieldsV1
+      fieldsV1:
+        f:status:
+          .: {}
+          f:conditions: {}
+          f:created: {}
+          f:desiredGeneration: {}
+          f:observedGeneration: {}
+          f:printableStatus: {}
+          f:ready: {}
+          f:runStrategy: {}
+          f:volumeSnapshotStatuses: {}
+      manager: virt-controller
+      operation: Update
+      subresource: status
+      time: '2025-08-07T15:46:21Z'
+  name: k8sw01-enti-prod01
+  namespace: k8s-enti-prod01
+  resourceVersion: '23674278'
+  uid: 4dcd773e-dc93-4522-a79b-a41df5a457d8
+spec:
+  runStrategy: RerunOnFailure
+  template:
+    metadata:
+      annotations:
+        harvesterhci.io/sshNames: '["k8s-enti-prod01/root"]'
+      creationTimestamp: null
+      labels:
+        guestcluster.harvesterhci.io/name: k8s-enti-prod01
+        harvesterhci.io/vmName: k8sw01-enti-prod01
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: network.harvesterhci.io/mgmt
+                    operator: In
+                    values:
+                      - 'true'
+                  - key: network.harvesterhci.io/storage-pods
+                    operator: In
+                    values:
+                      - 'true'
+                  - key: network.harvesterhci.io/storage
+                    operator: In
+                    values:
+                      - 'true'
+        podAffinity: {}
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: guestcluster.harvesterhci.io/name
+                      operator: In
+                      values:
+                        - k8s-enti-prod01
+                topologyKey: kubernetes.io/hostname
+              weight: 1
+      architecture: amd64
+      domain:
+        cpu:
+          cores: 16
+          sockets: 1
+          threads: 1
+        devices:
+          disks:
+            - bootOrder: 1
+              disk:
+                bus: virtio
+              name: disk-0
+            - bootOrder: 2
+              disk:
+                bus: virtio
+              name: disk-1
+            - bootOrder: 3
+              disk:
+                bus: virtio
+              name: disk-2
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+          inputs:
+            - bus: usb
+              name: tablet
+              type: tablet
+          interfaces:
+            - bridge: {}
+              macAddress: 86:ee:3c:c8:1f:21
+              model: virtio
+              name: nic-1
+            - bridge: {}
+              macAddress: de:6c:1f:e1:88:64
+              model: virtio
+              name: nic-2
+            - bridge: {}
+              macAddress: b6:63:b4:1e:66:a7
+              model: virtio
+              name: nic-3
+        features:
+          acpi:
+            enabled: true
+        machine:
+          type: q35
+        memory:
+          guest: 64Gi
+        resources:
+          limits:
+            cpu: '16'
+            memory: 64Gi
+          requests:
+            cpu: '1'
+            memory: 43690Mi
+      evictionStrategy: LiveMigrateIfPossible
+      hostname: k8sw01-enti-prod01
+      networks:
+        - multus:
+            networkName: k8s-enti-prod01/k8s-enti-prod01
+          name: nic-1
+        - multus:
+            networkName: k8s-storage-podto1/k8s-storage-podto1
+          name: nic-2
+        - multus:
+            networkName: k8s-storage-podt05/k8s-storage-podt05
+          name: nic-3
+      terminationGracePeriodSeconds: 120
+      volumes:
+        - name: disk-0
+          persistentVolumeClaim:
+            claimName: k8sw01-enti-prod01-disk-0-dpc4m
+        - name: disk-1
+          persistentVolumeClaim:
+            claimName: k8sw01-enti-prod01-disk-1-93bxn
+        - name: disk-2
+          persistentVolumeClaim:
+            claimName: k8sw01-enti-prod01-disk-2-agpdv
+        - cloudInitNoCloud:
+            networkDataSecretRef:
+              name: k8sw01-enti-prod01-0fdnm
+            secretRef:
+              name: k8sw01-enti-prod01-0fdnm
+          name: cloudinitdisk
+status:
+  conditions:
+    - lastProbeTime: null
+      lastTransitionTime: '2025-08-07T15:46:08Z'
+      status: 'True'
+      type: Ready
+    - lastProbeTime: null
+      lastTransitionTime: null
+      message: All of the VMI's DVs are bound and not running
+      reason: AllDVsReady
+      status: 'True'
+      type: DataVolumesReady
+    - lastProbeTime: null
+      lastTransitionTime: null
+      status: 'True'
+      type: LiveMigratable
+    - lastProbeTime: null
+      lastTransitionTime: null
+      status: 'True'
+      type: StorageLiveMigratable
+    - lastProbeTime: null
+      lastTransitionTime: '2025-08-07T15:46:10Z'
+      message: a non-live-updatable field was changed in the template spec
+      status: 'True'
+      type: RestartRequired
+    - lastProbeTime: '2025-08-07T15:46:21Z'
+      lastTransitionTime: null
+      status: 'True'
+      type: AgentConnected
+  created: true
+  desiredGeneration: 4
+  observedGeneration: 4
+  printableStatus: Running
+  ready: true
+  runStrategy: RerunOnFailure
+  volumeSnapshotStatuses:
+    - enabled: true
+      name: disk-0
+    - enabled: true
+      name: disk-1
+    - enabled: true
+      name: disk-2
+    - enabled: false
+      name: cloudinitdisk
+      reason: Snapshot is not supported for this volumeSource type [cloudinitdisk]
