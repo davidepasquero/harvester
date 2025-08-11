@@ -1,0 +1,118 @@
+type: kubevirt.io.virtualmachine
+metadata:
+  namespace: k8s-enti-prod01
+  annotations:
+    harvesterhci.io/volumeClaimTemplates: >-
+      [{"metadata":{"name":"k8sw04-enti-prod01-disk-0-jbahg","annotations":{"harvesterhci.io/imageId":"default/image-p6rcv"}},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"50Gi"}},"volumeMode":"Block","storageClassName":"ontap-san-nvme"}},{"metadata":{"name":"k8sw04-enti-prod01-disk-1-udfqm"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"50Gi"}},"volumeMode":"Block","storageClassName":"ontap-san-nvme"}},{"metadata":{"name":"k8sw04-enti-prod01-disk-2-lwcoi"},"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"50Gi"}},"volumeMode":"Block","storageClassName":"ontap-san-nvme"}}]
+    network.harvesterhci.io/ips: '[]'
+  labels:
+    harvesterhci.io/creator: harvester
+    harvesterhci.io/os: ''
+  name: k8sw04-enti-prod01
+__clone: true
+spec:
+  runStrategy: RerunOnFailure
+  template:
+    metadata:
+      annotations:
+        harvesterhci.io/sshNames: '["k8s-enti-prod01/root"]'
+      labels:
+        guestcluster.harvesterhci.io/name: k8s-enti-prod01
+        harvesterhci.io/vmName: k8sw04-enti-prod01
+    spec:
+      domain:
+        machine:
+          type: ''
+        cpu:
+          cores: 16
+          sockets: 1
+          threads: 1
+        devices:
+          inputs:
+            - bus: usb
+              name: tablet
+              type: tablet
+          interfaces:
+            - bridge: {}
+              model: virtio
+              name: nic-1
+            - bridge: {}
+              model: virtio
+              name: nic-2
+            - bridge: {}
+              model: virtio
+              name: nic-3
+          disks:
+            - name: disk-0
+              disk:
+                bus: virtio
+              bootOrder: 1
+            - name: disk-1
+              disk:
+                bus: virtio
+              bootOrder: 2
+            - name: disk-2
+              disk:
+                bus: virtio
+              bootOrder: 3
+            - name: cloudinitdisk
+              disk:
+                bus: virtio
+        resources:
+          limits:
+            memory: 64Gi
+            cpu: '16'
+        features:
+          acpi:
+            enabled: true
+      evictionStrategy: LiveMigrateIfPossible
+      hostname: k8sw04-enti-prod01
+      networks:
+        - name: nic-1
+          multus:
+            networkName: k8s-enti-prod01/k8s-enti-prod01
+        - name: nic-2
+          multus:
+            networkName: k8s-storage-podto1/k8s-storage-podto1
+        - name: nic-3
+          multus:
+            networkName: k8s-storage-podt05/k8s-storage-podt05
+      volumes:
+        - name: disk-0
+          persistentVolumeClaim:
+            claimName: k8sw04-enti-prod01-disk-0-jbahg
+        - name: disk-1
+          persistentVolumeClaim:
+            claimName: k8sw04-enti-prod01-disk-1-udfqm
+        - name: disk-2
+          persistentVolumeClaim:
+            claimName: k8sw04-enti-prod01-disk-2-lwcoi
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            secretRef:
+              name: k8sw04-enti-prod01-rduvi
+            networkDataSecretRef:
+              name: k8sw04-enti-prod01-rduvi
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution: []
+          preferredDuringSchedulingIgnoredDuringExecution: []
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution: []
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - podAffinityTerm:
+                _id: V44A
+                _anti: true
+                _namespaceOption: pod
+                matchExpressions: []
+                namespaces: null
+                _namespaces: ''
+                labelSelector:
+                  matchExpressions:
+                    - key: guestcluster.harvesterhci.io/name
+                      operator: In
+                      values:
+                        - k8s-enti-prod01
+                topologyKey: kubernetes.io/hostname
+              weight: 1
+      terminationGracePeriodSeconds: 120
