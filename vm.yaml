@@ -1,0 +1,136 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: new-vm # CHANGE THIS to the new VM name
+  namespace: k8s-enti-prod01 # CHANGE THIS to the correct namespace
+  annotations:
+    harvesterhci.io/vmRunStrategy: RerunOnFailure
+spec:
+  runStrategy: RerunOnFailure
+  template:
+    metadata:
+      labels:
+        harvesterhci.io/vmName: new-vm # CHANGE THIS to the new VM name
+    spec:
+      hostname: new-vm # CHANGE THIS to the new VM name
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: network.harvesterhci.io/mgmt
+                operator: In
+                values:
+                - "true"
+              - key: network.harvesterhci.io/storage-pods
+                operator: In
+                values:
+                - "true"
+              - key: network.harvesterhci.io/storage
+                operator: In
+                values:
+                - "true"
+      architecture: amd64
+      domain:
+        cpu:
+          cores: 16
+          sockets: 1
+          threads: 1
+        devices:
+          disks:
+          - bootOrder: 1
+            disk:
+              bus: virtio
+            name: disk-0
+          - bootOrder: 2
+            disk:
+              bus: virtio
+            name: disk-1
+          - bootOrder: 3
+            disk:
+              bus: virtio
+            name: disk-2
+          - disk:
+              bus: virtio
+            name: cloudinitdisk
+          inputs:
+          - bus: usb
+            name: tablet
+            type: tablet
+          interfaces:
+          - bridge: {}
+            model: virtio
+            name: nic-1
+          - bridge: {}
+            model: virtio
+            name: nic-2
+          - bridge: {}
+            model: virtio
+            name: nic-3
+        features:
+          acpi:
+            enabled: true
+        machine:
+          type: q35
+        memory:
+          guest: 64Gi
+        resources:
+          limits:
+            cpu: "16"
+            memory: 64Gi
+          requests:
+            cpu: "1"
+            memory: 43690Mi
+      evictionStrategy: LiveMigrateIfPossible
+      networks:
+      - multus:
+          networkName: k8s-enti-prod01/k8s-enti-prod01 # VERIFY/CHANGE THIS
+        name: nic-1
+      - multus:
+          networkName: k8s-storage-podto1/k8s-storage-podto1 # VERIFY/CHANGE THIS
+        name: nic-2
+      - multus:
+          networkName: k8s-storage-podt05/k8s-storage-podt05 # VERIFY/CHANGE THIS
+        name: nic-3
+      terminationGracePeriodSeconds: 120
+      volumes:
+      - name: disk-0
+        dataVolume:
+          name: new-vm-disk-0
+          volumeMode: Block
+          accessModes:
+            - ReadWriteMany
+          resources:
+            requests:
+              storage: 50Gi
+          storageClassName: ontap-san-nvme # VERIFY/CHANGE THIS
+          # The image ID is removed. You need to specify a valid image ID available in the new cluster.
+          # source:
+          #   http:
+          #     url: "" # Specify the image URL if needed
+      - name: disk-1
+        dataVolume:
+          name: new-vm-disk-1
+          volumeMode: Block
+          accessModes:
+            - ReadWriteMany
+          resources:
+            requests:
+              storage: 150Gi
+          storageClassName: ontap-san-nvme # VERIFY/CHANGE THIS
+      - name: disk-2
+        dataVolume:
+          name: new-vm-disk-2
+          volumeMode: Block
+          accessModes:
+            - ReadWriteMany
+          resources:
+            requests:
+              storage: 50Gi
+          storageClassName: ontap-san-nvme # VERIFY/CHANGE THIS
+      - cloudInitNoCloud:
+          networkDataSecretRef:
+            name: new-vm-cloud-init
+          secretRef:
+            name: new-vm-cloud-init
+        name: cloudinitdisk
