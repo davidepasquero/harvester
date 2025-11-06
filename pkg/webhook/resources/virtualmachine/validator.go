@@ -8,12 +8,12 @@ import (
 	"strings"
 
 	v1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/core/v1"
+	ctlstoragev1 "github.com/rancher/wrangler/v3/pkg/generated/controllers/storage/v1"
 	admissionregv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
+	runtime "k8s.io/apimachinery/pkg/runtime"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	ctlharvestercorev1 "github.com/harvester/harvester/pkg/generated/controllers/core/v1"
@@ -24,7 +24,6 @@ import (
 	"github.com/harvester/harvester/pkg/util"
 	indexeresutil "github.com/harvester/harvester/pkg/util/indexeres"
 	"github.com/harvester/harvester/pkg/util/resourcequota"
-	vmutil "github.com/harvester/harvester/pkg/util/virtualmachine"
 	werror "github.com/harvester/harvester/pkg/webhook/error"
 	indexerwebhook "github.com/harvester/harvester/pkg/webhook/indexeres"
 	"github.com/harvester/harvester/pkg/webhook/types"
@@ -41,8 +40,9 @@ func NewValidator(
 	vmCache ctlkubevirtv1.VirtualMachineCache,
 	vmiCache ctlkubevirtv1.VirtualMachineInstanceCache,
 	nadCache ctlcniv1.NetworkAttachmentDefinitionCache,
+	kubevirtCache ctlkubevirtv1.KubeVirtCache,
+	scCache ctlstoragev1.StorageClassCache,
 	settingCache ctlharvesterv1.SettingCache,
-	nodeCache v1.NodeCache,
 ) types.Validator {
 	return &vmValidator{
 		pvcCache:      pvcCache,
@@ -50,7 +50,9 @@ func NewValidator(
 		vmCache:       vmCache,
 		vmiCache:      vmiCache,
 		nadCache:      nadCache,
-		nodeCache:     nodeCache,
+		kubevirtCache: kubevirtCache,
+		scCache:       scCache,
+		settingCache:  settingCache,
 
 		rqCalculator: resourcequota.NewCalculator(nsCache, podCache, rqCache, vmimCache, settingCache),
 	}
@@ -63,7 +65,9 @@ type vmValidator struct {
 	vmCache       ctlkubevirtv1.VirtualMachineCache
 	vmiCache      ctlkubevirtv1.VirtualMachineInstanceCache
 	nadCache      ctlcniv1.NetworkAttachmentDefinitionCache
-	nodeCache     v1.NodeCache
+	kubevirtCache ctlkubevirtv1.KubeVirtCache
+	scCache       ctlstoragev1.StorageClassCache
+	settingCache  ctlharvesterv1.SettingCache
 	rqCalculator  *resourcequota.Calculator
 }
 
@@ -224,10 +228,6 @@ func (v *vmValidator) Create(_ *types.Request, newObj runtime.Object) error {
 		return err
 	}
 
-	if err := v.checkDedicatedCPUPlacement(vm); err != nil {
-		return err
-	}
-
 	if err := v.checkStorageResourceQuota(vm, nil); err != nil {
 		return err
 	}
@@ -246,10 +246,6 @@ func (v *vmValidator) Update(_ *types.Request, oldObj runtime.Object, newObj run
 	}
 
 	if err := v.checkVMSpec(newVM); err != nil {
-		return err
-	}
-
-	if err := v.checkDedicatedCPUPlacement(newVM); err != nil {
 		return err
 	}
 
@@ -273,11 +269,13 @@ func (v *vmValidator) Update(_ *types.Request, oldObj runtime.Object, newObj run
 		}
 	}
 
-	// Check resize volumes
-	if err := v.checkResizeVolumes(oldVM, newVM); err != nil {
+	// Check volume annotations
+	if err := v.checkVolumeAnnotations(oldVM, newVM); err != nil {
 		return err
 	}
 
+	// This logic will return in case interfaces are existing and not changed
+	// make sure new validation logic is added above this comment
 	if oldVM.Spec.Template != nil && newVM.Spec.Template != nil && reflect.DeepEqual(oldVM.Spec.Template.Spec.Domain.Devices.Interfaces, newVM.Spec.Template.Spec.Domain.Devices.Interfaces) {
 		return nil
 	}
@@ -301,6 +299,9 @@ func (v *vmValidator) checkVMSpec(vm *kubevirtv1.VirtualMachine) error {
 		return err
 	}
 	if err := v.checkTerminationGracePeriodSeconds(vm); err != nil {
+		return err
+	}
+	if err := v.checkEmptyMemory(vm); err != nil {
 		return err
 	}
 	if err := v.checkReservedMemoryAnnotation(vm); err != nil {
@@ -385,42 +386,95 @@ func (v *vmValidator) checkVolumeClaimTemplatesAnnotation(vm *kubevirtv1.Virtual
 	return nil
 }
 
-func (v *vmValidator) checkResizeVolumes(oldVM, newVM *kubevirtv1.VirtualMachine) error {
-	if oldVM.Annotations[util.AnnotationVolumeClaimTemplates] == "" || newVM.Annotations[util.AnnotationVolumeClaimTemplates] == "" {
+func (v *vmValidator) checkVolumeAnnotations(oldVM, newVM *kubevirtv1.VirtualMachine) error {
+	oldAnn := oldVM.Annotations[util.AnnotationVolumeClaimTemplates]
+	newAnn := newVM.Annotations[util.AnnotationVolumeClaimTemplates]
+	if oldAnn == "" || newAnn == "" || oldAnn == newAnn {
 		return nil
 	}
 
-	var oldPvcs, newPvcs []*corev1.PersistentVolumeClaim
-	if err := json.Unmarshal([]byte(oldVM.Annotations[util.AnnotationVolumeClaimTemplates]), &oldPvcs); err != nil {
-		return werror.NewInvalidError(fmt.Sprintf("failed to unmarshal %s", oldVM.Annotations[util.AnnotationVolumeClaimTemplates]), fmt.Sprintf("metadata.annotations.%s", util.AnnotationVolumeClaimTemplates))
+	oldPvcs, err := unmarshalPVCsWithNamespace(oldAnn, oldVM.Namespace)
+	if err != nil {
+		return werror.NewInvalidError(
+			fmt.Sprintf("failed to unmarshal %s", oldAnn),
+			fmt.Sprintf("metadata.annotations.%s", util.AnnotationVolumeClaimTemplates),
+		)
 	}
-	if err := json.Unmarshal([]byte(newVM.Annotations[util.AnnotationVolumeClaimTemplates]), &newPvcs); err != nil {
-		return werror.NewInvalidError(fmt.Sprintf("failed to unmarshal %s", newVM.Annotations[util.AnnotationVolumeClaimTemplates]), fmt.Sprintf("metadata.annotations.%s", util.AnnotationVolumeClaimTemplates))
+	newPvcs, err := unmarshalPVCsWithNamespace(newAnn, newVM.Namespace)
+	if err != nil {
+		return werror.NewInvalidError(
+			fmt.Sprintf("failed to unmarshal %s", newAnn),
+			fmt.Sprintf("metadata.annotations.%s", util.AnnotationVolumeClaimTemplates),
+		)
 	}
 
-	oldPvcMap, newPvcMap := map[string]*corev1.PersistentVolumeClaim{}, map[string]*corev1.PersistentVolumeClaim{}
+	oldPvcMap := make(map[string]*corev1.PersistentVolumeClaim)
 	for _, pvc := range oldPvcs {
 		oldPvcMap[pvc.Name] = pvc
 	}
+	newPvcMap := make(map[string]*corev1.PersistentVolumeClaim)
 	for _, pvc := range newPvcs {
 		newPvcMap[pvc.Name] = pvc
 	}
 
+	return v.checkPVCsStorageRequestsAndClass(oldPvcMap, newPvcMap)
+}
+
+// unmarshalPVCsWithNamespace unmarshals a JSON string into a slice of PVCs and sets their namespace if missing.
+func unmarshalPVCsWithNamespace(data, ns string) ([]*corev1.PersistentVolumeClaim, error) {
+	var pvcs []*corev1.PersistentVolumeClaim
+	if err := json.Unmarshal([]byte(data), &pvcs); err != nil {
+		return nil, err
+	}
+	for _, pvc := range pvcs {
+		if pvc.Namespace == "" {
+			pvc.Namespace = ns
+		}
+	}
+	return pvcs, nil
+}
+
+// checkPVCsStorageRequestsAndClass checks for storage request changes and storage class changes.
+func (v *vmValidator) checkPVCsStorageRequestsAndClass(oldPvcMap, newPvcMap map[string]*corev1.PersistentVolumeClaim) error {
+	var scChanged strings.Builder
 	for name, oldPvc := range oldPvcMap {
 		newPvc, ok := newPvcMap[name]
 		if !ok || newPvc == nil {
 			continue
 		}
-
-		// ref: https://pkg.go.dev/k8s.io/apimachinery/pkg/api/resource#Quantity.Cmp
-		// -1 means newPvc < oldPvc
-		// 1 means newPVC > oldPVC
-		if newPvc.Spec.Resources.Requests.Storage().Cmp(*oldPvc.Spec.Resources.Requests.Storage()) == -1 {
-			return werror.NewInvalidError(fmt.Sprintf("%s PVC requests storage can't be less than previous value", newPvc.Name), fmt.Sprintf("metadata.annotations.%s", util.AnnotationVolumeClaimTemplates))
+		if err := v.checkPVCStorageRequestChange(newPvc, oldPvc); err != nil {
+			return err
+		}
+		if oldPvc.Spec.StorageClassName != nil && newPvc.Spec.StorageClassName != nil &&
+			*newPvc.Spec.StorageClassName != *oldPvc.Spec.StorageClassName {
+			scChanged.WriteString(fmt.Sprintf(" new name %s in volume %s;", *newPvc.Spec.StorageClassName, oldPvc.Name))
 		}
 	}
-
+	if scChanged.Len() > 0 {
+		return fmt.Errorf("storage class names for the volumes in the %s annotation cannot be changed;%s",
+			util.AnnotationVolumeClaimTemplates, scChanged.String())
+	}
 	return nil
+}
+
+func (v *vmValidator) checkPVCStorageRequestChange(newPvc, oldPvc *corev1.PersistentVolumeClaim) error {
+	cmp := newPvc.Spec.Resources.Requests.Storage().Cmp(*oldPvc.Spec.Resources.Requests.Storage())
+	if cmp == -1 {
+		return werror.NewInvalidError(
+			fmt.Sprintf("%s PVC requests storage can't be less than previous value", newPvc.Name),
+			fmt.Sprintf("metadata.annotations.%s", util.AnnotationVolumeClaimTemplates),
+		)
+	}
+	if cmp == 0 {
+		return nil
+	}
+
+	pvc, err := v.pvcCache.Get(oldPvc.Namespace, oldPvc.Name)
+	if err != nil {
+		return err
+	}
+
+	return webhookutil.CheckExpand(pvc, v.vmCache, v.kubevirtCache, v.scCache, v.settingCache)
 }
 
 func (v *vmValidator) checkGoldenImage(vm *kubevirtv1.VirtualMachine) error {
@@ -462,7 +516,30 @@ func (v *vmValidator) checkGoldenImage(vm *kubevirtv1.VirtualMachine) error {
 }
 
 func (v *vmValidator) checkOccupiedPVCs(vm *kubevirtv1.VirtualMachine) error {
+	// only block two scenarios:
+	// - RWO volume
+	// - Longhorn volume
+	// other scenarios like RWX volume, user should know what they are doing
 	for _, volume := range vm.Spec.Template.Spec.Volumes {
+		// only check PVC volumes
+		if volume.PersistentVolumeClaim == nil {
+			continue
+		}
+		name := volume.PersistentVolumeClaim.ClaimName
+		pvc, err := v.pvcCache.Get(vm.Namespace, name)
+		if apierrors.IsNotFound(err) {
+			// means runtime creation, no need to check
+			continue
+		}
+		if err != nil {
+			// any error here should be raised
+			return werror.NewInternalError(fmt.Sprintf("failed to get PVC %s/%s, err: %s", vm.Namespace, name, err))
+		}
+		targetAccessMode := pvc.Spec.AccessModes
+		targetProvisioner := util.GetProvisionedPVCProvisioner(pvc, v.scCache)
+		if volumeSupportRWXForVM(targetAccessMode, targetProvisioner) {
+			continue
+		}
 		if volume.PersistentVolumeClaim != nil {
 			vms, err := v.vmCache.GetByIndex(indexeresutil.VMByPVCIndex, ref.Construct(vm.Namespace, volume.PersistentVolumeClaim.ClaimName))
 			if err != nil {
@@ -544,32 +621,28 @@ func (v *vmValidator) checkStorageResourceQuota(vm *kubevirtv1.VirtualMachine, o
 	return v.rqCalculator.CheckStorageResourceQuota(vm, oldVM)
 }
 
-func (v *vmValidator) checkDedicatedCPUPlacement(vm *kubevirtv1.VirtualMachine) error {
-	if !isDedicatedCPU(vm) {
-		return nil
+func volumeSupportRWXForVM(accessModes []corev1.PersistentVolumeAccessMode, provisioner string) bool {
+	if provisioner == util.CSIProvisionerLonghorn {
+		// Longhorn provisioner does not support RWX volume for VM
+		return false
 	}
 
-	// Skip check on VMs that are stopped. This allows the user to create
-	// VMs with CPU pinning enabled in advance even if the CPU Manager is
-	// currently disabled.
-	stopped, err := vmutil.IsVMStopped(vm, v.vmiCache)
-	if err != nil {
-		return werror.NewInternalError(fmt.Sprintf("failed to determine whether the VM is stopped or not: %s", err.Error()))
+	for _, mode := range accessModes {
+		if mode == corev1.ReadWriteMany {
+			return true
+		}
 	}
-	if stopped {
-		return nil
-	}
+	return false
+}
 
-	selector := labels.Set{kubevirtv1.CPUManager: "true"}.AsSelector()
-	nodeList, err := v.nodeCache.List(selector)
-	if err != nil {
-		return werror.NewInternalError(fmt.Sprintf("failed to list nodes with labels %s: %s", selector.String(), err.Error()))
+func (v *vmValidator) checkEmptyMemory(vm *kubevirtv1.VirtualMachine) error {
+	guestMem := resource.NewQuantity(0, resource.BinarySI)
+	if vm.Spec.Template.Spec.Domain.Memory != nil {
+		guestMem = vm.Spec.Template.Spec.Domain.Memory.Guest
 	}
-
-	if len(nodeList) == 0 {
-		return werror.NewInvalidError("VM requests CPU pinning, but no node with activated CPU Manager was found",
-			"spec.template.spec.domain.cpu.dedicatedCpuPlacement")
+	limitMem := vm.Spec.Template.Spec.Domain.Resources.Limits.Memory()
+	if guestMem.IsZero() && limitMem.IsZero() {
+		return werror.NewInvalidError("either memory.guest or resources.limits.memory must be set", "spec.template.spec.domain")
 	}
-
 	return nil
 }

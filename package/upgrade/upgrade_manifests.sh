@@ -562,8 +562,6 @@ upgrade_rancher() {
   cd $UPGRADE_TMP_DIR/rancher
 
   ./helm get values rancher -n cattle-system -o yaml >values.yaml
-  # Remove extraEnv fields from values.yaml. We don't want config like CATTLE_SHELL_IMAGE to overwrite shell-image setting.
-  yq -i 'del(.extraEnv)' values.yaml
   echo "Rancher values:"
   cat values.yaml
 
@@ -573,14 +571,30 @@ upgrade_rancher() {
     exit 1
   fi
 
-  # drop the potential manual patch upon shell-image to v0.1.26 on Harvester v1.3.2
-  local shellimage=$(kubectl get settings.management.cattle.io shell-image -ojsonpath='{.value}')
-  if [[ "$shellimage" = "rancher/shell:v0.1.26" ]]; then
-    echo "rancher shell-image is $shellimage, will be reverted to empty"
-    kubectl patch settings.management.cattle.io shell-image --type merge -p '{"value":""}'
-    kubectl get settings.management.cattle.io shell-image
-  else
-    echo "rancher shell-image is $shellimage, patch is not needed"
+  # Check whether fleet is in values.yaml. If not, add fleet image.
+  local fleet_field_exists=$(yq e '.fleet' values.yaml || echo "null")
+  if [ "$fleet_field_exists" = "null" ]; then
+    echo "Add fleet field to values.yaml"
+    cat >> values.yaml <<EOF
+fleet: |
+  image:
+    repository: rancher/fleet
+    tag: v0.14.0-rc.1
+    imagePullPolicy: IfNotPresent
+  agentImage:
+    repository: rancher/fleet-agent
+    tag: v0.14.0-rc.1
+    imagePullPolicy: IfNotPresent
+EOF
+  fi
+
+  # Clusters with witness node should have rancher's replicas set to -2 if the total number of nodes is 3.
+  local total_nodes_count=$(kubectl get nodes -o json 2>/dev/null | jq -r '.items | length' || echo 0)
+  local witness_nodes_count=$(kubectl get nodes -l "node-role.harvesterhci.io/witness=true" -o json 2>/dev/null | jq -r '.items | length' || echo 0)
+  # Here we don't consider the case of multiple witness nodes, as we prohibit it in Harvester.
+  if [[ "$witness_nodes_count" -gt 0 && "$total_nodes_count" -eq 3 ]]; then
+      echo "3-node cluster with witness node detected, setting Rancher replicas to -2"
+      RANCHER_REPLICAS=-2 yq e '.replicas = env(RANCHER_REPLICAS)' values.yaml -i
   fi
 
   if [ "$RANCHER_CURRENT_VERSION" = "$REPO_RANCHER_VERSION" ]; then
@@ -648,6 +662,7 @@ upgrade_rancher() {
   wait_rollout_with_loop cattle-fleet-local-system deployment fleet-agent
   pre_patch_timestamp=$(fleet_agent_timestamp)
   patch_fleet_cluster
+  wait_for_fleet_agent $pre_patch_timestamp
   wait_rollout_with_loop cattle-fleet-local-system deployment fleet-agent
 
   # After fleet-controller POD is restarted, it will check until the local cluster is imported, after that, redeploy the fleet-agent
@@ -731,57 +746,6 @@ EOF
   done
 }
 
-upgrade_network(){
-  [[ $UPGRADE_PREVIOUS_VERSION != "v1.0.3" ]] && return
-
-  shutdown_all_vms
-  wait_all_vms_shutdown
-  modify_nad_bridge
-  delete_canal_flannel_iface
-}
-
-wait_all_vms_shutdown() {
-    local vm_count="$(get_all_running_vm_count)"
-
-    until [ "$vm_count" = "0" ]
-    do
-      echo "Waiting for VM shutdown...($vm_count left)"
-      sleep 5
-      vm_count="$(get_all_running_vm_count)"
-    done
-}
-
-get_all_running_vm_count() {
-  local count
-
-  count=$(kubectl get vmi -A -ojson | jq '.items | length' || true)
-  echo $count
-}
-
-delete_canal_flannel_iface() {
-  kubectl delete helmchartconfig rke2-canal -n kube-system || true
-  kubectl patch configmap rke2-canal-config -n kube-system -p '{"data":{"canal_iface": ""}}' --type merge
-}
-
-modify_nad_bridge() {
-  [[ $(kubectl get clusternetwork vlan -o yaml | yq '.enable') == "false" ]] && echo "VLAN is disabled" && return
-
-  local bridge="vlan-br"
-  [[ $(kubectl get nodenetwork -o yaml | yq '.items[].spec.nic | select(. == "harvester-mgmt")') ]] && bridge="mgmt-br"
-
-  kubectl get net-attach-def -A -o json |
-  jq -r '.items[] | [.metadata.name, .metadata.namespace] | @tsv' |
-      while IFS=$'\t' read -r name namespace; do
-        if [ -z "$name" ]; then
-          break
-        fi
-        local nad=$(kubectl get net-attach-def -n "$namespace" "$name" -o yaml)
-        local config=$(echo "$nad" | yq '.spec.config')
-        export new_config=$(echo "$config" | jq -c --arg v "$bridge" '.bridge = $v')
-        echo "$nad" | yq '.spec.config = strenv(new_config)' | kubectl apply -f -
-      done
-}
-
 ensure_ingress_class_name() {
   echo "Ensuring existing rancher-expose Ingress has ingress class name specified"
 
@@ -837,6 +801,14 @@ patch_longhorn_settings() {
     fi
   else
     echo "longhorn detachManuallyAttachedVolumesWhenCordoned has been set in managedchart, do not patch again"
+  fi
+
+  EXIT_CODE=0
+  local value=$(yq -e -r '.spec.values.longhorn.defaultSettings.concurrentAutomaticEngineUpgradePerNodeLimit' $target) || EXIT_CODE=$?
+  if [ $EXIT_CODE = 0 ]; then
+    # this works even if it's already a string, because the `yq` above gives us the unquoted value
+    echo "patch longhorn concurrentAutomaticEngineUpgradePerNodeLimit to string"
+    yq ".spec.values.longhorn.defaultSettings.concurrentAutomaticEngineUpgradePerNodeLimit = \"$value\"" -i $target
   fi
 
   echo "longhorn related config"
@@ -1105,13 +1077,8 @@ upgrade_addon_rancher_monitoring()
   echo "upgrade addon rancher-monitoring"
 
   # .spec.valuesContent has dynamic fields, cannot merge simply, review in each release
-  # in v1.5.0, patch version is OK
-  upgrade_addon_try_patch_version_only "rancher-monitoring" "cattle-monitoring-system" $REPO_MONITORING_CHART_VERSION
-
-  # patch configmap and replace grafana pod if necessary
-  if [ "$REPO_MONITORING_CHART_VERSION" = "105.1.2+up61.3.2" ]; then
-    patch_grafana_nginx_proxy_config_configmap
-  fi
+  # in v1.7.0 it has a few patches
+  upgrade_addon_rancher_monitoring_with_patches $REPO_MONITORING_CHART_VERSION
 }
 
 # NOTE: review in each release, add corresponding process
@@ -1121,24 +1088,6 @@ upgrade_addon_rancher_logging()
   # .spec.valuesContent has dynamic fields, cannot merge simply, review in each release
   # the eventrouter image tag is aligned with Harvester tag, e.g. v1.5.1-rc3, v1.6.0
   upgrade_addon_rancher_logging_with_patch_eventrouter_image $REPO_LOGGING_CHART_VERSION $REPO_LOGGING_CHART_HARVESTER_EVENTROUTER_VERSION
-}
-
-# NOTE: review in each release, add corresponding process, runs before rancher-logging is bumped
-upgrade_harvester_upgradelog_loggingref() {
-  echo "upgrade harvester upgradelog loggingref"
-  # in v1.5.0, new rancher-logging is bumped, loggingref is required
-  if [ "${REPO_LOGGING_CHART_VERSION}" = "105.2.0+up4.10.0" ]; then
-    upgrade_harvester_upgradelog_with_patch_loggingref "${REPO_LOGGING_CHART_VERSION}"
-  fi
-}
-
-# adapt upgradeLog to new logging stack requirements, runs after rancher-logging is bumped
-upgrade_harvester_upgradelog_logging_fluentd_fluentbit() {
-  echo "upgrade harvester upgradelog logging fluend fluentbit"
-  # in v1.5.0, new rancher-logging is bumped, fluentbitagent and others are required
-  if [ "${REPO_LOGGING_CHART_VERSION}" = "105.2.0+up4.10.0" ]; then
-    upgrade_harvester_upgradelog_with_patch_logging_fluentd_fluentbit "${REPO_LOGGING_CHART_VERSION}"
-  fi
 }
 
 upgrade_addons()
@@ -1152,11 +1101,8 @@ upgrade_addons()
   # the rancher-monitoring and rancher-logging addon have flexible user-configurable fields
   # from v1.2.0, they are upgraded per following
   upgrade_addon_rancher_monitoring
-  # the upgradelog may be affected by the new rancher-logging
-  upgrade_harvester_upgradelog_loggingref
+
   upgrade_addon_rancher_logging
-  # after rancher-logging is upgraded, upgrade upgradelog if necessary
-  upgrade_harvester_upgradelog_logging_fluentd_fluentbit
 
   upgrade_nvidia_driver_toolkit_addon
 
@@ -1326,7 +1272,6 @@ upgrade_rancher
 patch_local_cluster_details
 update_local_rke_state_secret
 upgrade_harvester_cluster_repo
-upgrade_network
 ensure_ingress_class_name
 apply_extra_nonversion_manifests
 upgrade_harvester

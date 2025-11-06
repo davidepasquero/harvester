@@ -12,8 +12,8 @@ import (
 	"k8s.io/utils/pointer"
 
 	harvesterv1 "github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
-	"github.com/harvester/harvester/pkg/controller/master/node"
 	"github.com/harvester/harvester/pkg/controller/master/upgrade/repoinfo"
+	"github.com/harvester/harvester/pkg/util"
 )
 
 const (
@@ -146,11 +146,13 @@ func markComplete(upgrade *harvesterv1.Upgrade) {
 		harvesterv1.NodesUpgraded.IsTrue(upgrade) {
 		harvesterv1.UpgradeCompleted.True(upgrade)
 		upgrade.Labels[upgradeStateLabel] = StateSucceeded
+		upgrade.Labels[upgradeCleanupLabel] = StatePending
 	}
 	if harvesterv1.ImageReady.IsFalse(upgrade) || harvesterv1.RepoProvisioned.IsFalse(upgrade) ||
 		harvesterv1.SystemServicesUpgraded.IsFalse(upgrade) || harvesterv1.NodesUpgraded.IsFalse(upgrade) {
 		harvesterv1.UpgradeCompleted.False(upgrade)
 		upgrade.Labels[upgradeStateLabel] = StateFailed
+		upgrade.Labels[upgradeCleanupLabel] = StatePending
 	}
 }
 
@@ -206,12 +208,12 @@ func prepareCleanupPlan(upgrade *harvesterv1.Upgrade, imageList []string) *upgra
 					Effect:   corev1.TaintEffectNoSchedule,
 				},
 				{
-					Key:      node.KubeControlPlaneNodeLabelKey,
+					Key:      util.KubeControlPlaneNodeLabelKey,
 					Operator: corev1.TolerationOpExists,
 					Effect:   corev1.TaintEffectNoExecute,
 				},
 				{
-					Key:      node.KubeEtcdNodeLabelKey,
+					Key:      util.KubeEtcdNodeLabelKey,
 					Operator: corev1.TolerationOpExists,
 					Effect:   corev1.TaintEffectNoExecute,
 				},
@@ -235,7 +237,7 @@ func prepareCleanupPlan(upgrade *harvesterv1.Upgrade, imageList []string) *upgra
 				},
 			},
 			Upgrade: &upgradev1.ContainerSpec{
-				Image: fmt.Sprintf("%s:%s", upgradeImageRepository, imageVersion),
+				Image: upgrade.GetUpgradeImage(util.HarvesterUpgradeImageRepository, imageVersion),
 				Command: []string{
 					"sh", "-c", imageCleanupScript,
 				},
@@ -285,12 +287,12 @@ func preparePlan(upgrade *harvesterv1.Upgrade, concurrency int) *upgradev1.Plan 
 					Effect:   corev1.TaintEffectNoSchedule,
 				},
 				{
-					Key:      node.KubeControlPlaneNodeLabelKey,
+					Key:      util.KubeControlPlaneNodeLabelKey,
 					Operator: corev1.TolerationOpExists,
 					Effect:   corev1.TaintEffectNoExecute,
 				},
 				{
-					Key:      node.KubeEtcdNodeLabelKey,
+					Key:      util.KubeEtcdNodeLabelKey,
 					Operator: corev1.TolerationOpExists,
 					Effect:   corev1.TaintEffectNoExecute,
 				},
@@ -314,7 +316,7 @@ func preparePlan(upgrade *harvesterv1.Upgrade, concurrency int) *upgradev1.Plan 
 				},
 			},
 			Upgrade: &upgradev1.ContainerSpec{
-				Image:   fmt.Sprintf("%s:%s", upgradeImageRepository, imageVersion),
+				Image:   upgrade.GetUpgradeImage(util.HarvesterUpgradeImageRepository, imageVersion),
 				Command: []string{"do_upgrade_node.sh"},
 				Args:    []string{"prepare"},
 				Env: []corev1.EnvVar{
@@ -366,7 +368,7 @@ func applyNodeJob(upgrade *harvesterv1.Upgrade, repoInfo *repoinfo.RepoInfo, nod
 					Containers: []corev1.Container{
 						{
 							Name:    "apply",
-							Image:   fmt.Sprintf("%s:%s", upgradeImageRepository, imageVersion),
+							Image:   upgrade.GetUpgradeImage(util.HarvesterUpgradeImageRepository, imageVersion),
 							Command: []string{"do_upgrade_node.sh"},
 							Args:    []string{jobType},
 							Env: []corev1.EnvVar{
@@ -464,7 +466,7 @@ func applyRestoreVMJob(upgrade *harvesterv1.Upgrade, repoInfo *repoinfo.RepoInfo
 					Containers: []corev1.Container{
 						{
 							Name:    "apply",
-							Image:   fmt.Sprintf("%s:%s", upgradeImageRepository, imageVersion),
+							Image:   upgrade.GetUpgradeImage(util.HarvesterUpgradeImageRepository, imageVersion),
 							Command: []string{"upgrade-helper"},
 							Args: []string{
 								"restore-vm",
@@ -525,7 +527,7 @@ func applyManifestsJob(upgrade *harvesterv1.Upgrade, repoInfo *repoinfo.RepoInfo
 					Containers: []corev1.Container{
 						{
 							Name:    "apply",
-							Image:   fmt.Sprintf("%s:%s", upgradeImageRepository, imageVersion),
+							Image:   upgrade.GetUpgradeImage(util.HarvesterUpgradeImageRepository, imageVersion),
 							Command: []string{"upgrade_manifests.sh"},
 							Env: []corev1.EnvVar{
 								{
@@ -551,12 +553,12 @@ func getDefaultTolerations() []corev1.Toleration {
 			Effect:   corev1.TaintEffectNoSchedule,
 		},
 		{
-			Key:      node.KubeControlPlaneNodeLabelKey,
+			Key:      util.KubeControlPlaneNodeLabelKey,
 			Operator: corev1.TolerationOpExists,
 			Effect:   corev1.TaintEffectNoExecute,
 		},
 		{
-			Key:      node.KubeEtcdNodeLabelKey,
+			Key:      util.KubeEtcdNodeLabelKey,
 			Operator: corev1.TolerationOpExists,
 			Effect:   corev1.TaintEffectNoExecute,
 		},
@@ -823,7 +825,7 @@ func newNodeBuilder(name string) *nodeBuilder {
 }
 
 func (n *nodeBuilder) ControlPlane() *nodeBuilder {
-	n.WithLabel(node.KubeControlPlaneNodeLabelKey, "true")
+	n.WithLabel(util.KubeControlPlaneNodeLabelKey, "true")
 	return n
 }
 

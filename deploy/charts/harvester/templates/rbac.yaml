@@ -194,6 +194,7 @@ rules:
   - list
   resourceNames:
   - csi-online-expand-validation
+  - csi-driver-config
 - apiGroups:
   - longhorn.io
   resources:
@@ -202,3 +203,13 @@ rules:
   verbs:
   - get
   - list
+- apiGroups:
+  - snapshot.storage.k8s.io
+  resources:
+  - volumesnapshots
+  - volumesnapshotcontents
+  - volumesnapshotclasses
+  - volumesnapshots/status
+  - volumesnapshotcontents/status
+  verbs:
+  - '*'

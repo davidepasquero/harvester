@@ -8,6 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/kubernetes"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 	cdicommon "kubevirt.io/containerized-data-importer/pkg/controller/common"
@@ -17,6 +18,7 @@ import (
 	ctlharvesterv1 "github.com/harvester/harvester/pkg/generated/controllers/harvesterhci.io/v1beta1"
 	ctlkubevirtv1 "github.com/harvester/harvester/pkg/generated/controllers/kubevirt.io/v1"
 	"github.com/harvester/harvester/pkg/indexeres"
+	"github.com/harvester/harvester/pkg/settings"
 	"github.com/harvester/harvester/pkg/util"
 	"github.com/harvester/harvester/pkg/util/virtualmachine"
 	"github.com/harvester/harvester/pkg/util/virtualmachineinstance"
@@ -50,8 +52,10 @@ const (
 type vmformatter struct {
 	vmiCache      ctlkubevirtv1.VirtualMachineInstanceCache
 	pvcCache      ctlcorev1.PersistentVolumeClaimCache
+	nodeCache     ctlcorev1.NodeCache
 	scCache       ctlstoragev1.StorageClassCache
 	vmBackupCache ctlharvesterv1.VirtualMachineBackupCache
+	settingCache  ctlharvesterv1.SettingCache
 	clientSet     kubernetes.Clientset
 }
 
@@ -112,7 +116,7 @@ func (vf *vmformatter) formatter(request *types.APIRequest, resource *types.RawR
 		resource.AddAction(request, unpauseVM)
 	}
 
-	if canMigrate(vmi) {
+	if canMigrate(vf.nodeCache, vmi) {
 		resource.AddAction(request, migrate)
 		resource.AddAction(request, findMigratableNodes)
 
@@ -254,8 +258,18 @@ func isReady(vmi *kubevirtv1.VirtualMachineInstance) bool {
 	return false
 }
 
-func canMigrate(vmi *kubevirtv1.VirtualMachineInstance) bool {
+func canMigrate(nodeCache ctlcorev1.NodeCache, vmi *kubevirtv1.VirtualMachineInstance) bool {
 	if vmi == nil || vmi.DeletionTimestamp != nil || vmi.Annotations[util.AnnotationMigrationState] != "" {
+		return false
+	}
+
+	nodes, err := nodeCache.List(labels.Everything())
+	if err != nil {
+		logrus.WithError(err).Error("Failed to list nodes for migration check")
+		return false
+	}
+
+	if len(nodes) < 2 {
 		return false
 	}
 
@@ -303,6 +317,20 @@ func (vf *vmformatter) canDoBackup(vm *kubevirtv1.VirtualMachine, vmi *kubevirtv
 		if _, find := pvc.Annotations[cdicommon.AnnCreatedForDataVolume]; find {
 			return false
 		}
+	}
+
+	backupTargetSetting, err := vf.settingCache.Get(settings.BackupTargetSettingName)
+	if err != nil {
+		logrus.WithError(err).Errorf("Can't get setting %s", settings.BackupTargetSettingName)
+		return false
+	}
+	target, err := settings.DecodeBackupTarget(backupTargetSetting.Value)
+	if err != nil {
+		logrus.WithError(err).Errorf("Can't decode %s setting %s", settings.BackupTargetSettingName, backupTargetSetting.Value)
+		return false
+	}
+	if target.IsDefaultBackupTarget() {
+		return false
 	}
 	return true
 }

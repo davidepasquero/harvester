@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	// Although we don't use following drivers directly, we need to import them to register drivers.
 	// NFS Ref: https://github.com/longhorn/backupstore/blob/3912081eb7c5708f0027ebbb0da4934537eb9d72/nfs/nfs.go#L47-L51
@@ -38,12 +39,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/tools/clientcmd"
+	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	networkv1 "github.com/harvester/harvester-network-controller/pkg/apis/network.harvesterhci.io/v1beta1"
 	"github.com/harvester/harvester-network-controller/pkg/utils"
 	"github.com/harvester/harvester/pkg/apis/harvesterhci.io/v1beta1"
 	"github.com/harvester/harvester/pkg/containerd"
-	nodectl "github.com/harvester/harvester/pkg/controller/master/node"
 	settingctl "github.com/harvester/harvester/pkg/controller/master/setting"
 	ctlv1beta1 "github.com/harvester/harvester/pkg/generated/controllers/harvesterhci.io/v1beta1"
 	ctlkubevirtv1 "github.com/harvester/harvester/pkg/generated/controllers/kubevirt.io/v1"
@@ -52,6 +53,7 @@ import (
 	ctlsnapshotv1 "github.com/harvester/harvester/pkg/generated/controllers/snapshot.storage.k8s.io/v1"
 	"github.com/harvester/harvester/pkg/settings"
 	"github.com/harvester/harvester/pkg/util"
+	backuputil "github.com/harvester/harvester/pkg/util/backup"
 	networkutil "github.com/harvester/harvester/pkg/util/network"
 	tlsutil "github.com/harvester/harvester/pkg/util/tls"
 	vmUtil "github.com/harvester/harvester/pkg/util/virtualmachine"
@@ -190,6 +192,9 @@ func NewValidator(
 
 	validateSettingFuncs[settings.RancherClusterSettingName] = validator.validateRancherCluster
 	validateSettingUpdateFuncs[settings.RancherClusterSettingName] = validator.validateUpdateRancherCluster
+
+	validateSettingFuncs[settings.KubeVirtMigrationSettingName] = validator.validateKubeVirtMigration
+	validateSettingUpdateFuncs[settings.KubeVirtMigrationSettingName] = validator.validateUpdateKubeVirtMigration
 
 	return validator
 }
@@ -569,7 +574,7 @@ func (v *settingValidator) validateBackupTarget(setting *v1beta1.Setting) error 
 	// GetBackupStoreDriver tests whether the driver can List objects, so we don't need to do it again here.
 	// S3: https://github.com/longhorn/backupstore/blob/56ddc538b85950b02c37432e4854e74f2647ca61/s3/s3.go#L38-L87
 	// NFS: https://github.com/longhorn/backupstore/blob/56ddc538b85950b02c37432e4854e74f2647ca61/nfs/nfs.go#L46-L81
-	endpoint := util.ConstructEndpoint(target)
+	endpoint := backuputil.ConstructEndpoint(target)
 	if _, err := backupstore.GetBackupStoreDriver(endpoint); err != nil {
 		return werror.NewInvalidError(err.Error(), settings.KeywordValue)
 	}
@@ -1494,8 +1499,8 @@ func (v *settingValidator) checkVCSpansAllNodes(config *networkutil.Config) erro
 	//check if vlanconfig contains all the nodes in the cluster
 	for _, node := range nodes {
 		//skip witness nodes which do not run LH Pods
-		isManagement := nodectl.IsManagementRole(node)
-		if nodectl.IsWitnessNode(node, isManagement) {
+		isManagement := util.IsManagementRole(node)
+		if util.IsWitnessNode(node, isManagement) {
 			continue
 		}
 
@@ -1834,6 +1839,22 @@ func validateUpgradeConfigFields(setting *v1beta1.Setting) error {
 		return fmt.Errorf("invalid image preload concurrency: %d", concurrency)
 	}
 
+	// If LogReadyTimeout is not set by the user, JSON unmarshalling will set it to 0 by default.
+	// We return nil in that case from the perspective of unit tests
+	timeoutStr := upgradeConfig.LogReadyTimeout
+	if timeoutStr == "" {
+		return nil
+	}
+	timeout, err := strconv.Atoi(timeoutStr)
+	if err != nil {
+		return fmt.Errorf("invalid value for image preload timeout: %s", timeoutStr)
+	}
+	timeoutDuration := time.Duration(timeout) * time.Minute
+	// If the user set LogReadyTimeout to a value not in the permissible range, we return an error
+	if timeoutDuration < util.MinUpgradeLogReadyTimeout || timeoutDuration > util.MaxUpgradeLogReadyTimeout {
+		return fmt.Errorf("invalid logReadyTimeout must be between %s to %s minutes, given: %d", util.MinUpgradeLogReadyTimeout, util.MaxUpgradeLogReadyTimeout, timeoutDuration)
+	}
+
 	return nil
 }
 
@@ -1931,4 +1952,50 @@ func (v *settingValidator) validateRancherCluster(newSetting *v1beta1.Setting) e
 
 func (v *settingValidator) validateUpdateRancherCluster(_ *v1beta1.Setting, newSetting *v1beta1.Setting) error {
 	return v.validateRancherCluster(newSetting)
+}
+
+func (v *settingValidator) validateKubeVirtMigration(newSetting *v1beta1.Setting) error {
+	if newSetting.Name != settings.KubeVirtMigrationSettingName {
+		return nil
+	}
+
+	vmims, err := v.vmimCache.List(metav1.NamespaceAll, labels.Everything())
+	if err != nil {
+		return werror.NewInternalError(fmt.Sprintf("Failed to list VM Migrations, err: %v", err.Error()))
+	}
+	for _, vmim := range vmims {
+		if vmim.DeletionTimestamp != nil || vmim.Status.MigrationState.Completed {
+			continue
+		}
+		return werror.NewBadRequest("There is a VM Migration in progress, please wait until it is completed before updating the kubevirt-migration setting")
+	}
+
+	var kubevirtMigration *kubevirtv1.MigrationConfiguration
+	if newSetting.Default != "" && newSetting.Default != "{}" {
+		kubevirtMigration, err = settings.DecodeConfig[kubevirtv1.MigrationConfiguration](newSetting.Default)
+		if err != nil {
+			return werror.NewInvalidError(err.Error(), settings.KeywordDefault)
+		}
+	}
+
+	if newSetting.Value != "" && newSetting.Value != "{}" {
+		kubevirtMigration, err = settings.DecodeConfig[kubevirtv1.MigrationConfiguration](newSetting.Value)
+		if err != nil {
+			return werror.NewInvalidError(err.Error(), settings.KeywordValue)
+		}
+	}
+	if kubevirtMigration == nil {
+		return nil
+	}
+	if kubevirtMigration.NodeDrainTaintKey != nil && *kubevirtMigration.NodeDrainTaintKey != "" {
+		return werror.NewInvalidError("nodeDrainTaintKey field cannot be configured", "nodeDrainTaintKey")
+	}
+	if kubevirtMigration.Network != nil && *kubevirtMigration.Network != "" {
+		return werror.NewInvalidError("network field is configured by vm-migration-network setting", "network")
+	}
+	return nil
+}
+
+func (v *settingValidator) validateUpdateKubeVirtMigration(_ *v1beta1.Setting, newSetting *v1beta1.Setting) error {
+	return v.validateKubeVirtMigration(newSetting)
 }

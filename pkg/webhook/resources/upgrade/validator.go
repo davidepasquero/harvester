@@ -39,6 +39,7 @@ import (
 
 const (
 	upgradeStateLabel                         = "harvesterhci.io/upgradeState"
+	upgradeCleanupLabel                       = "harvesterhci.io/upgradeCleanup"
 	skipWebhookAnnotation                     = "harvesterhci.io/skipWebhook"
 	skipSingleReplicaDetachedVol              = "harvesterhci.io/skipSingleReplicaDetachedVol"
 	rkeInternalIPAnnotation                   = "rke2.io/internal-ip"
@@ -58,6 +59,7 @@ func NewValidator(
 	versionCache ctlharvesterv1.VersionCache,
 	vmBackupCache ctlharvesterv1.VirtualMachineBackupCache,
 	svmbackupCache ctlharvesterv1.ScheduleVMBackupCache,
+	settingCache ctlharvesterv1.SettingCache,
 	vmiCache ctlkubevirtv1.VirtualMachineInstanceCache,
 	endpointCache v1.EndpointsCache,
 	httpClient *http.Client,
@@ -75,6 +77,7 @@ func NewValidator(
 		svmbackupCache:    svmbackupCache,
 		vmiCache:          vmiCache,
 		endpointCache:     endpointCache,
+		settingCache:      settingCache,
 		httpClient:        httpClient,
 		bearToken:         bearToken,
 	}
@@ -94,6 +97,7 @@ type upgradeValidator struct {
 	svmbackupCache    ctlharvesterv1.ScheduleVMBackupCache
 	vmiCache          ctlkubevirtv1.VirtualMachineInstanceCache
 	endpointCache     v1.EndpointsCache
+	settingCache      ctlharvesterv1.SettingCache
 	httpClient        *http.Client
 	bearToken         string
 }
@@ -138,6 +142,22 @@ func (v *upgradeValidator) Create(_ *types.Request, newObj runtime.Object) error
 	if len(upgrades) > 0 {
 		msg := fmt.Sprintf("cannot proceed until previous upgrade %q completes", upgrades[0].Name)
 		return werror.NewConflict(msg)
+	}
+
+	reqCleanup, err := labels.NewRequirement(upgradeCleanupLabel, selection.In, []string{upgrade.StatePending})
+	if err != nil {
+		return werror.NewBadRequest(fmt.Sprintf("failed to create the '%s' resource selection label: %s", upgradeCleanupLabel, err))
+	}
+	upgrades, err = v.upgrades.List(newUpgrade.Namespace, labels.NewSelector().Add(*reqCleanup))
+	if err != nil {
+		return werror.NewInternalError(fmt.Sprintf("can't list upgrades, err: %+v", err))
+	}
+	if len(upgrades) > 0 {
+		msg := "cannot proceed until the following upgrades completed their cleanup process: "
+		for _, u := range upgrades {
+			msg += fmt.Sprintf("%s,", u.Name)
+		}
+		return werror.NewConflict(msg[:len(msg)-1])
 	}
 
 	if newUpgrade.Annotations != nil {
@@ -196,7 +216,7 @@ func (v *upgradeValidator) checkResources(upgrade *v1beta1.Upgrade) error {
 		return err
 	}
 
-	restoreVM, err := util.IsRestoreVM()
+	restoreVM, err := util.IsRestoreVM(v.settingCache)
 	if err != nil {
 		return err
 	}

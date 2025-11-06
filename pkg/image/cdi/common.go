@@ -32,6 +32,8 @@ const (
 type ProgressUpdater struct {
 	totalBytes  int64
 	targetBytes int64
+	imageNS     string
+	imageName   string
 	lastTime    time.Time
 	rwlock      sync.RWMutex
 
@@ -50,7 +52,7 @@ func (pu *ProgressUpdater) Write(p []byte) (n int, err error) {
 
 	now := time.Now()
 	if now.Sub(pu.lastTime) > 1*time.Second || almostCompleted {
-		logrus.Infof("Downloaded %d bytes", pu.totalBytes)
+		logrus.Infof("Downloaded %d bytes for image %s/%s", pu.totalBytes, pu.imageNS, pu.imageName)
 		pu.vmImgUpdateLocker.Lock()
 		pu.vmImgCond.Signal()
 		pu.vmImgUpdateLocker.Unlock()
@@ -147,7 +149,7 @@ func fetchImageVirtualSize(url string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("Range", "bytes=0-128")
+	req.Header.Set("Range", "bytes=0-127")
 
 	rsp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -155,7 +157,10 @@ func fetchImageVirtualSize(url string) (int64, error) {
 	}
 	defer rsp.Body.Close()
 
-	rawContent, err := io.ReadAll(rsp.Body)
+	// Use LimitReader to prevent OOM, some http servers may ignore the Range header and return full content
+	// which may lead to OOM if the image is too large
+	limitedReader := io.LimitReader(rsp.Body, 128)
+	rawContent, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return 0, err
 	}
@@ -178,5 +183,4 @@ func fetchImageVirtualSize(url string) (int64, error) {
 
 	// ensure the virtual size is not too large, skip gosec G115
 	return int64(virtualSize), nil //nolint:gosec
-
 }

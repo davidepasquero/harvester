@@ -35,6 +35,7 @@ const (
 	StateUpgradingNodes          = "UpgradingNodes"
 	StateSucceeded               = "Succeeded"
 	StateFailed                  = "Failed"
+	StatePending                 = "Pending"
 
 	nodeStateImagesPreloading       = "Images preloading"
 	nodeStateImagesPreloaded        = "Images preloaded"
@@ -46,6 +47,7 @@ const (
 	upgradeNodeLabel                = "upgrade.cattle.io/node"
 	upgradeStateLabel               = "harvesterhci.io/upgradeState"
 	upgradeJobTypeLabel             = "harvesterhci.io/upgradeJobType"
+	upgradeCleanupLabel             = "harvesterhci.io/upgradeCleanup"
 	upgradeJobTypePreDrain          = "pre-drain"
 	upgradeJobTypePostDrain         = "post-drain"
 	upgradeJobTypeRestoreVM         = "restore-vm"
@@ -66,6 +68,7 @@ type jobHandler struct {
 	jobClient      jobv1.JobClient
 	jobCache       jobv1.JobCache
 	configMapCache ctlcorev1.ConfigMapCache
+	settingCache   ctlharvesterv1.SettingCache
 }
 
 func (h *jobHandler) OnChanged(_ string, job *batchv1.Job) (*batchv1.Job, error) {
@@ -150,6 +153,7 @@ func (h *jobHandler) syncNodeJob(job *batchv1.Job) (*batchv1.Job, error) {
 				} else {
 					setNodeUpgradeStatus(toUpdate, nodeName, nodeStateWaitingReboot, "", "")
 					if err := h.setNodeWaitRebootLabel(node, repoInfo); err != nil {
+						logrus.Warnf("Failed to set wait-reboot label on node %s: %v, this might cause the potential issue.", node.Name, err)
 						return nil, err
 					}
 					// postDrain ack will be handled in node controller
@@ -164,6 +168,7 @@ func (h *jobHandler) syncNodeJob(job *batchv1.Job) (*batchv1.Job, error) {
 				} else {
 					setNodeUpgradeStatus(toUpdate, nodeName, nodeStateWaitingReboot, "", "")
 					if err := h.setNodeWaitRebootLabel(node, repoInfo); err != nil {
+						logrus.Warnf("Failed to set wait-reboot label on node %s: %v, this might cause the potential issue.", node.Name, err)
 						return nil, err
 					}
 				}
@@ -181,7 +186,6 @@ func (h *jobHandler) syncNodeJob(job *batchv1.Job) (*batchv1.Job, error) {
 		LabelSelector: fmt.Sprintf("%s=%s", rancherPlanSecretMachineLabel, machineName),
 		FieldSelector: fmt.Sprintf("type=%s", rancherPlanSecretType),
 	})
-
 	if err != nil {
 		return job, err
 	}
@@ -298,7 +302,7 @@ func (h *jobHandler) setNodeWaitRebootLabel(node *v1.Node, repoInfo *repoinfo.Re
 }
 
 func (h *jobHandler) sendRestoreVMJob(upgrade *harvesterv1.Upgrade, node *v1.Node, repoInfo *repoinfo.RepoInfo) error {
-	restoreVM, err := util.IsRestoreVM()
+	restoreVM, err := util.IsRestoreVM(h.settingCache)
 	if err != nil {
 		logrus.WithFields(logrus.Fields{"name": upgrade.Name, "node": node.Name}).WithError(err).
 			Errorf("Failed to get setting UpgradeConfig, skip restore VM job")

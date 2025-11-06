@@ -45,6 +45,30 @@ sparsify_passive_img()
   fi
 }
 
+# elemental scans /dev for blockdevices and checks for their mount points
+# if the disk is already mounted then the current logic remounts them as read/write partition
+# and if a partition is not mounted elemental tries to just mount it as a read/write partition
+# in case of multipath devices, the /dev/mapper device is not detected, and elemental
+# finds the path making the disk as not mounted.
+# due to change introduced by https://github.com/rancher/elemental-toolkit/pull/2302 elemental reconciles
+# the actual disk partition in use and finds the correct mapper device related to the cos partition
+# however the logic still scans the underlying disk for mount path
+# elemental assumes disk is not mounted and tries to mount the mapper device to a new partition
+# in the case, below COS_STATE is normally mounted as a readonly partition under /run/initramfs/cos-state
+# when multipath is enabled for boot disks, elemental tries to mount COS_STATE under /run/cos/state
+# the partition is mounted as readonly partition as elemental is not aware that the partition is already mounted
+# this results in upgrade being broken since the partition is mounted in readonly state, and we need to ensure
+# remount option is select. Mounting the partition under /run/cos/state works around this,
+# as elemental now finds a disk mounted under /run/cos/state and uses the `remount` option to mount the partition
+check_and_mount_state(){
+  local MAPPER_IN_USE=$(chroot ${HOST_DIR} blkid -L COS_STATE | grep mapper)
+  if [ -n "$MAPPER_IN_USE" ]; then
+    echo "mapper devices in use, performing mount of COS_STATE partition"
+    mkdir -p ${HOST_DIR}/run/cos/state
+    chroot ${HOST_DIR} mount -L COS_STATE /run/cos/state
+  fi
+}
+
 is_mounted()
 {
   mount | awk -v DIR="$1" '{ if ($3 == DIR) { exit 0 } } ENDFILE { exit 1 }'
@@ -64,6 +88,11 @@ clean_up_tmp_files()
   if [ -n "$tmp_rootfs_squashfs" ]; then
     echo "Try to remove $tmp_rootfs_squashfs..."
     rm -vf "$tmp_rootfs_squashfs"
+  fi
+
+  if is_mounted "/run/cos/state"; then
+    echo "Trying to unmount /run/cos/state"
+    umount /run/cos/state || echo "Umount /run/cos/state failed with return code: $?"
   fi
 }
 
@@ -184,14 +213,51 @@ wait_vms_out_or_shutdown()
       break
     fi
 
+    check_migrations_phase "Scheduling"
+    check_migrations_phase "Pending"
+    check_migrations_phase "Failed"
+
     echo "Waiting for VM live-migration or shutdown...(count: $vm_count)"
     sleep 5
   done
   echo "all VMs on node $HARVESTER_UPGRADE_NODE_NAME have been live-migrated or shutdown"
 }
 
-shutdown_repo_vm()
-{
+check_migrations_phase() {
+  local migration_phase="${1}"
+  local running_vmis=($(kubectl get vmi -A -lkubevirt.io/nodeName="${HARVESTER_UPGRADE_NODE_NAME}" -ojsonpath='{range .items[?(@.status.phase=="Running")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'))
+  for vmi in "${running_vmis[@]}"; do
+    vmi_namespace=$(echo "${vmi}" | cut -d '/' -f1)
+    vmi_name=$(echo "${vmi}" | cut -d '/' -f2)
+    vmims=($(kubectl get vmim -n "${vmi_namespace}" -lkubevirt.io/vmi-name=${vmi_name} -ojsonpath="{.items[?(@.status.phase=='${migration_phase}')].metadata.name}"))
+    for vmim in "${vmims[@]}"; do
+      # filter out non-upgrade related vmims to avoid shutting down the vm due
+      # to any previous unrelated pre-upgrade migration failures.
+      # the vmim's name prefix is used as the filter because the vmim doesn't
+      # have any labels or annotations that reference the upgrade resource.
+      # all upgrade-related vmims have the 'kubevirt-evacuation-' prefix.
+      if [[ "${vmim}" != "kubevirt-evacuation"* ]]; then
+        echo "skipping non-upgrade related vmim ${vmim}"
+        continue
+      fi
+
+      echo "found virtual machine migration. phase:${migration_phase}, node:${HARVESTER_UPGRADE_NODE_NAME}, ns: ${vmi_namespace}, vm:${vmi_name}, vmim:${vmim}"
+
+      # if the warning events confirmed a migration failure, shutdown this vm
+      if [ "${migration_phase}" = "Failed" ]; then
+        warnings=$(kubectl -n "${vmi_namespace}" events --for=virtualmachineinstancemigration/"${vmim}" --types=warning -ojsonpath='{.items[*].reason}' 2>/dev/null)
+        if [ ! -z "${warnings}" ]; then
+          if echo "${warnings}" | grep -i -q "failedmigration"; then
+            echo "shutting down virtual machine ${vmi_namespace}/${vmi_name} due to failed migration. vmim: ${vmi_namespace}/${vmim}, reasons: ${warnings}"
+            virtctl -n "${vmi_namespace}" stop "${vmi_name}" || true # don't fail upgrade if virtctl failed
+          fi
+        fi
+      fi
+    done
+  done
+}
+
+shutdown_repo_vm() {
   # We don't need to live-migrate upgrade repo VM. Just make sure it's up when we need it.
   # Shutdown it if it's running on this upgrading node.
   repo_vm_name="upgrade-repo-$HARVESTER_UPGRADE_NAME"
@@ -241,46 +307,57 @@ recover_rancher_system_agent() {
 wait_longhorn_engines() {
   local node_count=$(kubectl get nodes --selector=harvesterhci.io/managed=true,node-role.harvesterhci.io/witness!=true -o json | jq -r '.items | length')
 
-  # For each running engine and its volume
-  kubectl get engines.longhorn.io -n longhorn-system -o json |
-    jq -r '.items | map(select(.status.currentState == "running")) | map(.metadata.name + " " + .metadata.labels.longhornvolume) | .[]' |
+  while true; do
+    local unhealthy_found=0
+
+    # For each running engine and its volume
     while read -r lh_engine lh_volume; do
       echo Checking running engine "${lh_engine}..."
 
+      if [ -f "/tmp/skip-$lh_volume" ]; then
+        echo "Skip $lh_volume."
+        continue
+      fi
+
       # Wait until volume turn healthy (except two-node clusters)
-      while [ true ]; do
-        if [ $node_count -gt 2 ];then
-          robustness=$(kubectl get volumes.longhorn.io/$lh_volume -n longhorn-system -o jsonpath='{.status.robustness}')
-          if [ "$robustness" = "healthy" ]; then
-            echo "Volume $lh_volume is healthy."
-            break
-          fi
-        else
-          # two node situation, make sure maximum two replicas are healthy
-          expected_replicas=2
-
-          # replica 1 case
-          volume_replicas=$(kubectl get volumes.longhorn.io/$lh_volume -n longhorn-system -o jsonpath='{.spec.numberOfReplicas}')
-          if [ $volume_replicas -eq 1 ]; then
-            expected_replicas=1
-          fi
-
-          ready_replicas=$(kubectl get engines.longhorn.io/$lh_engine -n longhorn-system -o json |
-                             jq -r '.status.replicaModeMap | to_entries | map(select(.value == "RW")) | length')
-          if [ $ready_replicas -ge $expected_replicas ]; then
-            break
-          fi
-        fi
-
-        if [ -f "/tmp/skip-$lh_volume" ]; then
-          echo "Skip $lh_volume."
+      if [ $node_count -gt 2 ];then
+        robustness=$(kubectl get volumes.longhorn.io/$lh_volume -n longhorn-system -o jsonpath='{.status.robustness}')
+        if [ "$robustness" != "healthy" ]; then
+          echo "Volume $lh_volume is not healthy."
+          unhealthy_found=1
           break
         fi
+      else
+        # two node situation, make sure maximum two replicas are healthy
+        expected_replicas=2
 
-        echo "Waiting for volume $lh_volume to be healthy..."
-        sleep 10
-      done
-    done
+        # replica 1 case
+        volume_replicas=$(kubectl get volumes.longhorn.io/$lh_volume -n longhorn-system -o jsonpath='{.spec.numberOfReplicas}')
+        if [ $volume_replicas -eq 1 ]; then
+          expected_replicas=1
+        fi
+
+        ready_replicas=$(kubectl get engines.longhorn.io/$lh_engine -n longhorn-system -o json |
+                            jq -r '.status.replicaModeMap // {} | to_entries | map(select(.value == "RW")) | length')
+        if [ $ready_replicas -lt $expected_replicas ]; then
+          echo "Volume $lh_volume does not have enough healthy replicas."
+          unhealthy_found=1
+          break
+        fi
+      fi
+    done < <(
+      kubectl get engines.longhorn.io -n longhorn-system -o json |
+        jq -r '.items | map(select(.status.currentState == "running")) | map(.metadata.name + " " + .metadata.labels.longhornvolume) | .[]'
+    )
+
+    if [ $unhealthy_found -eq 0 ]; then
+      echo "All Longhorn volumes are healthy."
+      break
+    fi
+
+    echo "Waiting for all Longhorn volumes to be healthy..."
+    sleep 10
+  done
 }
 
 command_pre_drain() {
@@ -323,7 +400,7 @@ EOF
 wait_rke2_upgrade() {
   # RKE2 doesn't show '-rcX' in nodeInfo, so we remove '-rcX' in $REPO_RKE2_VERSION.
   # Warning: we can't upgrade from a '-rcX' to another in the same minor version like v1.22.12-rc1+rke2r1 to v1.22.12-rc2+rke2r1.
-  REPO_RKE2_VERSION_WITHOUT_RC=$(echo -n $REPO_RKE2_VERSION | sed 's/-rc[[:digit:]]*//g') 
+  REPO_RKE2_VERSION_WITHOUT_RC=$(echo -n $REPO_RKE2_VERSION | sed 's/-rc[[:digit:]]*//g')
   until [ "$(get_node_rke2_version)" = "$REPO_RKE2_VERSION_WITHOUT_RC" ]
   do
     echo "Waiting for RKE2 to be upgraded..."
@@ -351,72 +428,6 @@ disable:
 - rke2-snapshot-controller
 - rke2-snapshot-controller-crd
 - rke2-snapshot-validation-webhook
-EOF
-}
-
-convert_nodenetwork_to_vlanconfig() {
-  # sometimes (e.g. apiserver is busy/not ready), the kubectl may fail, use the saved value
-  if [ -z "$UPGRADE_PREVIOUS_VERSION" ]; then
-    detect_upgrade
-  fi
-  detect_node_current_harvester_version
-  echo "The UPGRADE_PREVIOUS_VERSION is $UPGRADE_PREVIOUS_VERSION, NODE_CURRENT_HARVESTER_VERSION is $NODE_CURRENT_HARVESTER_VERSION, will check nodenetwork upgrade node option"
-
-  if test "$UPGRADE_PREVIOUS_VERSION" != "v1.0.3" && test "$NODE_CURRENT_HARVESTER_VERSION" != "v1.0.3"; then
-    echo "There is nothing to do in nodenetwork"
-    return
-  fi
-
-  # Don't need to convert nodenetwork if harvester-mgmt is used as vlan interface in any nodenetwork
-  [[ $(kubectl get nodenetwork -o yaml | yq '.items[].spec.nic | select(. == "harvester-mgmt")') ]] &&
-  echo "Don't need to convert nodenetwork because harvester-mgmt is used as VLAN interface in not less than one nodenetwork" && return
-
-  local name=${HARVESTER_UPGRADE_NODE_NAME}-vlan
-  local EXIT_CODE=$?
-  # when object is not existing, kubectl will return 1
-  nn=$(kubectl get nodenetwork "$name" -o yaml) || EXIT_CODE=$?
-  if [ $EXIT_CODE != 0 ]; then
-    echo "Cannot find nodenetwork $name, skip patch"
-    return
-  fi
-
-  vlan_interface=$(echo "$nn" | yq '.spec.nic')
-
-  # the default ${HARVESTER_UPGRADE_NODE_NAME}-vlan has no nics
-  [[ "$vlan_interface" == "null" ]] && echo "Default/invalid nodenetwork $name without any nics, skip patch" && return
-
-  type=$(echo "$nn" | yq e '.spec.nic as $nic | .status.networkLinkStatus.[$nic].type')
-  if [ "$type" == "bond" ]; then
-    vlan_interface_details=$(v="$vlan_interface" yq '.install.networks.[env(v)]' $HOST_DIR/oem/harvester.config)
-    nics=($(echo "$vlan_interface_details" | yq '.interfaces[].name'))
-    mtu=$(echo "$vlan_interface_details" | yq '.mtu')
-    mode=$(echo "$vlan_interface_details" | yq '.bondoptions.mode')
-    miimon=$(echo "$vlan_interface_details" | yq '.bondoptions.miimon')
-  else
-    nics=("$vlan_interface")
-    mtu=0
-    mode="active-backup"
-    miimon=0
-  fi
-
-  # below code is idempotent
-
-  kubectl apply -f - <<EOF
-apiVersion: network.harvesterhci.io/v1beta1
-kind: VlanConfig
-metadata:
-  name: $name
-spec:
-  clusterNetwork: vlan
-  nodeSelector:
-    kubernetes.io/hostname: "$HARVESTER_UPGRADE_NODE_NAME"
-  uplink:
-    bondOptions:
-      mode: $mode
-      miimon: $miimon
-    linkAttributes:
-      mtu: $mtu
-    nics: [$(IFS=,; echo "${nics[*]}")]
 EOF
 }
 
@@ -453,7 +464,7 @@ set_rke2_device_permissions() {
 "nonroot-devices": true
 EOF
   fi
-} 
+}
 
 # Delete the cpu_manager_state file during the initramfs stage. During a reboot, this state file is always reverted
 # because it was originally created during the system installation, becoming part of the root filesystem. As a result,
@@ -508,46 +519,35 @@ calculateCPUReservedInMilliCPU() {
   echo $reserved
 }
 
-replace_with_mgmtvlan() {
-  if [ -z "$UPGRADE_PREVIOUS_VERSION" ]; then
+generate_networkmanager_config() {
+   if [ -z "$UPGRADE_PREVIOUS_VERSION" ]; then
     detect_upgrade
   fi
 
-  if [[ ! "$UPGRADE_PREVIOUS_VERSION" =~ ^v1\.5\.[0-9]$ ]]; then
-    echo "version: $UPGRADE_PREVIOUS_VERSION does not require patching mgmt vlan"
+  # NetworkManager is new in Harvester v1.7.0, and we can only upgrade to
+  # v1.7.x from v1.6.x, which means we only need to generate NetworkManager
+  # config if the previous version is v1.6.x.
+  if [[ ! "$UPGRADE_PREVIOUS_VERSION" =~ ^v1\.6\.[0-9]$ ]]; then
+    echo "version: $UPGRADE_PREVIOUS_VERSION does not require generating NetworkManager config"
     return
   fi
 
-  #files to update with mgmt vlan
-  #updating 90_custom.yaml will update setup_bond.sh,setup_bridge.sh after reboot
-  local CUSTOM90_FILE="${HOST_DIR}/oem/90_custom.yaml"
-  local CONFIG_FILE="${HOST_DIR}/oem/harvester.config"
-
-  # Check if the harvester config file exists
-  if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "Error: Config file '$CONFIG_FILE' not found."
+  # Just in case NetworkManager config has already been generated
+  # and/or potentially modified by the user, let's not overwrite it.
+  if [ -e ${HOST_DIR}/oem/91_networkmanager.yaml ]; then
+    echo "skipping NetworkManager config generation (${HOST_DIR}/oem/91_networkmanager.yaml already exists)"
     return
   fi
 
-  # Check if 90_custom.yaml file exists
-  if [[ ! -f "$CUSTOM90_FILE" ]]; then
-    echo "File not found: $CUSTOM90_FILE"
-    return
-  fi
-
-  # Search for the mgmt vlanid installed in the config file
-  vlan_id=$(yq '.install.managementinterface.vlanid' $CONFIG_FILE)
-
-  if [[ "$vlan_id" -ge 2 && "$vlan_id" -le 4094 ]]; then
-    # Replace the range with the VLAN ID
-    sed -i "s/accept all vlan, PVID=1 by default/accept $vlan_id,PVID=1 by default/" $CUSTOM90_FILE
-    sed -i "s/bridge vlan add vid 2-4094/bridge vlan add vid $vlan_id/" "$CUSTOM90_FILE"
-    echo "Updated $CUSTOM90_FILE with VLAN ID $vlan_id"
-  else
-    echo "VLAN ID: $vlan_id remove bridge vlan"
-    sed -i "s/accept all vlan, PVID=1 by default/PVID=1 by default/" $CUSTOM90_FILE
-    sed -i "/bridge vlan add vid/d" $CUSTOM90_FILE
-  fi
+  echo "Generating NetworkManager config..."
+  # Whether this succeeds or fails, it will print a message either way...
+  /usr/local/bin/harvester-installer generate-network-yaml --config ${HOST_DIR}/oem/harvester.config --cloud-init ${HOST_DIR}/oem/91_networkmanager.yaml 2>&1
+  # ...but because we're running with set -e, if the above fails, the script
+  # will abort, and the rest of the OS upgrade will not proceed.  If that
+  # happens, the upgrade job will probably be re-run indefinitely.  Is it
+  # better to get stuck here in that way?  Or would it be better to barrel
+  # on regardless and continue the OS upgrade with the knowledge that
+  # when the node comes back up after reboot, networking may be broken?
 }
 
 upgrade_os() {
@@ -560,7 +560,7 @@ upgrade_os() {
     echo "Skip upgrading OS. The OS version is already \"$CURRENT_OS_VERSION\"."
     return
   fi
-  
+
   # upgrade OS image and reboot
   if [ -n "$NEW_OS_SQUASHFS_IMAGE_FILE" ]; then
     tmp_rootfs_squashfs="$NEW_OS_SQUASHFS_IMAGE_FILE"
@@ -586,13 +586,34 @@ EOF
   # make sure the current passive image isn't using too much disk space
   sparsify_passive_img
 
+  # perform mount of /run/cos/state if needed when multipath is being used for boot
+  check_and_mount_state
+
+  # copy elemental from upgrade image so latest elemental binary is used for upgrades.
+  cp /usr/local/bin/elemental $HOST_DIR/tmp/elemental
+
   elemental_upgrade_log="${UPGRADE_TMP_DIR#"$HOST_DIR"}/elemental-upgrade-$(date +%Y%m%d%H%M%S).log"
   local ret=0
-  chroot $HOST_DIR elemental upgrade \
+  # elemental-toolkit built for SL Micro 6.1 needs a newer glibc than
+  # is available on SLE Micro 5.5 hosts.  We can work around this by
+  # bind mounting /lib64 from this newer container into the host
+  # environment, but we only want to do this if we know there's a
+  # problem (if the host is already running SL Micro 6.1, then bind
+  # mounting /lib64 from a SLE 15 SP7 container will actually break
+  # things).
+  local glibc_too_old=$(chroot $HOST_DIR /tmp/elemental version 2>&1 | grep 'GLIBC.*not found')
+  if [ -n "$glibc_too_old" ]; then
+    echo "GLIBC on host is too old for new elemental build; bind mounting /lib64 to fix"
+    mount -o bind /lib64 $HOST_DIR/lib64
+  fi
+  chroot $HOST_DIR /tmp/elemental upgrade \
     --logfile "$elemental_upgrade_log" \
     --directory ${tmp_rootfs_mount#"$HOST_DIR"} \
     --config-dir ${tmp_elemental_config_dir#"$HOST_DIR"} \
     --debug || ret=$?
+  if [ -n "$glibc_too_old" ]; then
+    umount $HOST_DIR/lib64
+  fi
   if [ "$ret" != 0 ]; then
     echo "elemental upgrade failed with return code: $ret"
     cat "$HOST_DIR$elemental_upgrade_log"
@@ -613,13 +634,15 @@ EOF
   # PATCH2: add /oem/grubcustom if it does not exist
   # grubcustom use source to load, so we can use touch directly
   GRUBENV_FILE="/oem/grubcustom"
-  chroot $HOST_DIR /bin/bash -c "if ! [ -f ${GRUBENV_FILE} ]; then touch ${GRUBENV_FILE}; fi" 
+  chroot $HOST_DIR /bin/bash -c "if ! [ -f ${GRUBENV_FILE} ]; then touch ${GRUBENV_FILE}; fi"
 
-  multiPathEnabled=$(yq '.os.externalStorageConfig.enabled // false' ${HOST_DIR}/oem/harvester.config)
+  multiPathEnabled=$(yq '.os.externalstorage.enabled // false' ${HOST_DIR}/oem/harvester.config)
   if [ ${multiPathEnabled} == false ]
   then
     thirdPartyArgs=$(chroot $HOST_DIR grub2-editenv /oem/grubenv list |grep third_party_kernel_args | awk -F"third_party_kernel_args=" '{print $2}')
-    if [[ ${thirdPartyArgs} != *"multipath=off"* ]]
+    # tweaked check to ensure the multipath arguments are only added in 1.6.x if they are not present
+    # users may have multipath=on for externalStorageSupport and we need to respect that
+    if [[ ${thirdPartyArgs} != *"multipath"* ]]
     then
       thirdPartyArgs="${thirdPartyArgs} multipath=off"
       thirdPartyArgs=$(echo ${thirdPartyArgs} | xargs)
@@ -648,8 +671,14 @@ stages:
          group: 0
          content: W1VuaXRdCkRlc2NyaXB0aW9uPURldmljZS1NYXBwZXIgTXVsdGlwYXRoIERldmljZSBDb250cm9sbGVyCkJlZm9yZT1sdm0yLWFjdGl2YXRpb24tZWFybHkuc2VydmljZQpCZWZvcmU9bG9jYWwtZnMtcHJlLnRhcmdldCBibGstYXZhaWxhYmlsaXR5LnNlcnZpY2Ugc2h1dGRvd24udGFyZ2V0CldhbnRzPXN5c3RlbWQtdWRldmQta2VybmVsLnNvY2tldApBZnRlcj1zeXN0ZW1kLXVkZXZkLWtlcm5lbC5zb2NrZXQKQWZ0ZXI9bXVsdGlwYXRoZC5zb2NrZXQgc3lzdGVtZC1yZW1vdW50LWZzLnNlcnZpY2UKQmVmb3JlPWluaXRyZC1jbGVhbnVwLnNlcnZpY2UKRGVmYXVsdERlcGVuZGVuY2llcz1ubwpDb25mbGljdHM9c2h1dGRvd24udGFyZ2V0CkNvbmZsaWN0cz1pbml0cmQtY2xlYW51cC5zZXJ2aWNlCkNvbmRpdGlvbktlcm5lbENvbW1hbmRMaW5lPSFub21wYXRoCkNvbmRpdGlvblZpcnR1YWxpemF0aW9uPSFjb250YWluZXIKCltTZXJ2aWNlXQpUeXBlPW5vdGlmeQpOb3RpZnlBY2Nlc3M9bWFpbgpFeGVjU3RhcnQ9L3NiaW4vbXVsdGlwYXRoZCAtZCAtcwpFeGVjUmVsb2FkPS9zYmluL211bHRpcGF0aGQgcmVjb25maWd1cmUKVGFza3NNYXg9aW5maW5pdHkKCltJbnN0YWxsXQpXYW50ZWRCeT1zeXNpbml0LnRhcmdldA==
          encoding: base64
-         ownerstring: ""         
+         ownerstring: ""
 EOF
+  fi
+
+  # SLE Micro 5.5 uses /usr/lib/ssh/sftp-server
+  # SL Micro 6.1 uses /usr/libexec/ssh/sftp-server
+  if [ -e ${HOST_DIR}/etc/ssh/sshd_config.d/sftp.conf ]; then
+    sed -i 's%/usr/lib/ssh/sftp-server%/usr/libexec/ssh/sftp-server%' ${HOST_DIR}/etc/ssh/sshd_config.d/sftp.conf
   fi
 
   umount $tmp_rootfs_mount
@@ -684,10 +713,7 @@ command_post_drain() {
 
   kubectl taint node $HARVESTER_UPGRADE_NODE_NAME kubevirt.io/drain- || true
 
-  convert_nodenetwork_to_vlanconfig
-
-  #replace the range vlans with mgmt vlan in wicked scripts and 90_custom.yaml file before node reboot
-  replace_with_mgmtvlan
+  generate_networkmanager_config
 
   upgrade_os
 }
@@ -726,10 +752,7 @@ command_single_node_upgrade() {
   wait_rke2_upgrade
   clean_rke2_archives
 
-  convert_nodenetwork_to_vlanconfig
-
-  #replace the range vlans with mgmt vlan in wicked scripts and 90_custom.yaml file before node reboot
-  replace_with_mgmtvlan
+  generate_networkmanager_config
 
   # Upgrade OS
   upgrade_os

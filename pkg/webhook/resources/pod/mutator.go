@@ -17,16 +17,22 @@ import (
 	"github.com/harvester/harvester/pkg/webhook/types"
 )
 
-var matchingLabels = []labels.Set{
-	{
-		"longhorn.io/component": "backing-image-data-source",
+var matchingLabelsForNamespace = map[string][]labels.Set {
+	util.LonghornSystemNamespaceName: {
+		{
+			"longhorn.io/component": "backing-image-data-source",
+		},
 	},
-	{
-		"app.kubernetes.io/name":      "harvester",
-		"app.kubernetes.io/component": "apiserver",
+	util.HarvesterSystemNamespaceName: {
+		{
+			"app.kubernetes.io/name":      "harvester",
+			"app.kubernetes.io/component": "apiserver",
+		},
 	},
-	{
-		"app": "rancher",
+	util.CattleSystemNamespaceName: {
+		{
+			"app": "rancher",
+		},
 	},
 }
 
@@ -62,16 +68,7 @@ func (m *podMutator) Resource() types.Resource {
 
 func (m *podMutator) Create(_ *types.Request, newObj runtime.Object) (types.PatchOps, error) {
 	pod := newObj.(*corev1.Pod)
-
-	podLabels := labels.Set(pod.Labels)
-	var match bool
-	for _, v := range matchingLabels {
-		if v.AsSelector().Matches(podLabels) {
-			match = true
-			break
-		}
-	}
-	if !match {
+	if !shouldPatch(pod) {
 		return nil, nil
 	}
 
@@ -235,4 +232,19 @@ func volumeMountPatch(target []corev1.VolumeMount, path string, volumeMount core
 		return "", err
 	}
 	return fmt.Sprintf(`{"op": "add", "path": "%s", "value": %s}`, path, valueStr), nil
+}
+
+func shouldPatch(pod *corev1.Pod) bool {
+	matchingLabels, exists := matchingLabelsForNamespace[pod.Namespace]
+	if !exists {
+		return false
+	}
+
+	podLabels := labels.Set(pod.Labels)
+	for _, ls := range matchingLabels {
+		if ls.AsSelector().Matches(podLabels) {
+			return true
+		}
+	}
+	return false
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 
@@ -15,6 +14,7 @@ import (
 	monitoringv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	catalogv1 "github.com/rancher/rancher/pkg/apis/catalog.cattle.io/v1"
 	mgmtv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
+	provisioningv1 "github.com/rancher/rancher/pkg/apis/provisioning.cattle.io/v1"
 	upgradev1 "github.com/rancher/system-upgrade-controller/pkg/apis/upgrade.cattle.io/v1"
 	controllergen "github.com/rancher/wrangler/v3/pkg/controller-gen"
 	"github.com/rancher/wrangler/v3/pkg/controller-gen/args"
@@ -179,6 +179,13 @@ func main() {
 				GenerateTypes:   false,
 				GenerateClients: true,
 			},
+			provisioningv1.SchemeGroupVersion.Group: {
+				Types: []interface{}{
+					provisioningv1.Cluster{},
+				},
+				GenerateTypes:   false,
+				GenerateClients: true,
+			},
 			monitoring.GroupName: {
 				Types: []interface{}{
 					monitoringv1.Prometheus{},
@@ -230,14 +237,14 @@ func main() {
 // `networkattachementdefinitions` that will raises crd not found exception of the NAD controller.
 func nadControllerInterfaceRefactor() {
 	absPath, _ := filepath.Abs("pkg/generated/controllers/k8s.cni.cncf.io/v1/interface.go")
-	input, err := ioutil.ReadFile(absPath)
+	input, err := os.ReadFile(absPath)
 	if err != nil {
 		logrus.Fatalf("failed to read the network-attachment-definition file: %v", err)
 	}
 
 	output := bytes.ReplaceAll(input, []byte("networkattachmentdefinitions"), []byte("network-attachment-definitions"))
 
-	if err = ioutil.WriteFile(absPath, output, 0644); err != nil {
+	if err = os.WriteFile(absPath, output, 0600); err != nil {
 		logrus.Fatalf("failed to update the network-attachment-definition file: %v", err)
 	}
 }
@@ -254,13 +261,13 @@ func capiWorkaround() {
 
 	// Replace the variable `SchemeGroupVersion` with `GroupVersion` in the above files path
 	for _, absPath := range files {
-		input, err := ioutil.ReadFile(absPath)
+		input, err := os.ReadFile(absPath)
 		if err != nil {
 			logrus.Fatalf("failed to read the clusters.cluster.x-k8s.io client file: %v", err)
 		}
 		output := bytes.ReplaceAll(input, []byte("v1beta1.SchemeGroupVersion"), []byte("v1beta1.GroupVersion"))
 
-		if err = ioutil.WriteFile(absPath, output, 0644); err != nil {
+		if err = os.WriteFile(absPath, output, 0600); err != nil {
 			logrus.Fatalf("failed to update the clusters.cluster.x-k8s.io client file: %v", err)
 		}
 	}
@@ -282,13 +289,13 @@ func loggingWorkaround() {
 
 	// Replace the variable `SchemeGroupVersion` with `GroupVersion` in the above files path
 	for _, absPath := range files {
-		input, err := ioutil.ReadFile(absPath)
+		input, err := os.ReadFile(absPath)
 		if err != nil {
 			logrus.Fatalf("failed to read the logging.banzaicloud.io client file: %v", err)
 		}
 		output := bytes.ReplaceAll(input, []byte("v1beta1.SchemeGroupVersion"), []byte("v1beta1.GroupVersion"))
 
-		if err = ioutil.WriteFile(absPath, output, 0644); err != nil {
+		if err = os.WriteFile(absPath, output, 0600); err != nil {
 			logrus.Fatalf("failed to update the logging.banzaicloud.io client file: %v", err)
 		}
 	}

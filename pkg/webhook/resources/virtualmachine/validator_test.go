@@ -3,18 +3,17 @@ package virtualmachine
 import (
 	"testing"
 
+	cniv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-
-	cniv1 "github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1"
+	corefake "k8s.io/client-go/kubernetes/fake"
 	kubevirtv1 "kubevirt.io/api/core/v1"
 
 	"github.com/harvester/harvester/pkg/generated/clientset/versioned/fake"
 	"github.com/harvester/harvester/pkg/util/fakeclients"
-
-	k8sfake "k8s.io/client-go/kubernetes/fake"
 )
 
 func Test_virtualMachineValidator_duplicateMacAddress(t *testing.T) {
@@ -653,7 +652,7 @@ func Test_virtualMachineValidator_duplicateMacAddress(t *testing.T) {
 	fakeVMCache := fakeclients.VirtualMachineCache(clientset.KubevirtV1().VirtualMachines)
 	fakeNadCache := fakeclients.NetworkAttachmentDefinitionCache(clientset.K8sCniCncfIoV1().NetworkAttachmentDefinitions)
 
-	validator := NewValidator(nil, nil, nil, nil, nil, nil, fakeVMCache, nil, fakeNadCache, nil, nil).(*vmValidator)
+	validator := NewValidator(nil, nil, nil, nil, nil, nil, fakeVMCache, nil, fakeNadCache, nil, nil, nil).(*vmValidator)
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -667,168 +666,188 @@ func Test_virtualMachineValidator_duplicateMacAddress(t *testing.T) {
 	}
 }
 
-func Test_virtualMachineValidator_dedicatedCPUPlacement(t *testing.T) {
-	vm0 := &kubevirtv1.VirtualMachine{
+func TestVmValidator_Update(t *testing.T) {
+	templateVM := &kubevirtv1.VirtualMachine{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vm-0",
+			Name:      "test",
 			Namespace: "default",
+			Annotations: map[string]string{
+				"harvesterhci.io/volumeClaimTemplates": `[{"metadata":{"name":"test-disk-0",` +
+					`"annotations":{"harvesterhci.io/imageId":"default/image"}},` +
+					`"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"10Gi"}}` +
+					`,"volumeMode":"Block","storageClassName":"longhorn-image"}}]`,
+			},
 		},
 		Spec: kubevirtv1.VirtualMachineSpec{
 			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{},
 				Spec: kubevirtv1.VirtualMachineInstanceSpec{
+					Networks: []kubevirtv1.Network{
+						{
+							Name: "nic-1",
+							NetworkSource: kubevirtv1.NetworkSource{
+								Multus: &kubevirtv1.MultusNetwork{
+									NetworkName: "default/vlan-1",
+								},
+							},
+						},
+					},
 					Domain: kubevirtv1.DomainSpec{
-						CPU: &kubevirtv1.CPU{
-							DedicatedCPUPlacement: true,
+						Devices: kubevirtv1.Devices{
+							Interfaces: []kubevirtv1.Interface{
+								{
+									Name:       "nic-1",
+									MacAddress: "00:00:00:00:00:01",
+								},
+							},
+						},
+						Memory: &kubevirtv1.Memory{
+							Guest: resource.NewQuantity(1024*1024*1024, resource.BinarySI),
 						},
 					},
 				},
 			},
-		},
-	}
-
-	vm1 := &kubevirtv1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vm-1",
-			Namespace: "default",
-		},
-		Spec: kubevirtv1.VirtualMachineSpec{
-			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{},
-				},
-			},
-		},
-	}
-
-	vm2 := &kubevirtv1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vm-2",
-			Namespace: "default",
-		},
-		Spec: kubevirtv1.VirtualMachineSpec{
-			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{
-						CPU: &kubevirtv1.CPU{
-							DedicatedCPUPlacement: false,
-						},
-					},
-				},
-			},
-		},
-	}
-
-	vm3 := &kubevirtv1.VirtualMachine{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "vm-3",
-			Namespace: "default",
-		},
-		Spec: kubevirtv1.VirtualMachineSpec{
-			Template: &kubevirtv1.VirtualMachineInstanceTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{},
-				Spec: kubevirtv1.VirtualMachineInstanceSpec{
-					Domain: kubevirtv1.DomainSpec{
-						CPU: &kubevirtv1.CPU{
-							DedicatedCPUPlacement: true,
-						},
-					},
-				},
-			},
-		},
-		Status: kubevirtv1.VirtualMachineStatus{
-			PrintableStatus: kubevirtv1.VirtualMachineStatusStopped,
-		},
-	}
-
-	node0 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-0",
-			Labels: map[string]string{
-				kubevirtv1.CPUManager: "true",
-			},
-		},
-	}
-
-	node1 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-1",
-			Labels: map[string]string{
-				kubevirtv1.CPUManager: "false",
-			},
-		},
-	}
-
-	node2 := &corev1.Node{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "node-2",
 		},
 	}
 
 	tests := []struct {
-		name        string
-		vm          *kubevirtv1.VirtualMachine
-		nodes       []*corev1.Node
-		expectError bool
+		name          string
+		oldVM         *kubevirtv1.VirtualMachine
+		newVM         *kubevirtv1.VirtualMachine
+		oldObjMeta    *metav1.ObjectMeta
+		newObjMeta    *metav1.ObjectMeta
+		newSpec       *kubevirtv1.VirtualMachineSpec
+		expectedError bool
 	}{
 		{
-			name:        "CPU pinning enabled, w/o CPU Manager enabled, VM stopped, returns success",
-			vm:          vm3,
-			nodes:       []*corev1.Node{node1, node2},
-			expectError: false,
+			name:  "storage class name is changed which results in rejection",
+			oldVM: templateVM.DeepCopy(),
+			newVM: templateVM.DeepCopy(),
+			newObjMeta: &metav1.ObjectMeta{
+				Name:      templateVM.Name,
+				Namespace: templateVM.Namespace,
+				Annotations: map[string]string{
+					"harvesterhci.io/volumeClaimTemplates": `[{"metadata":{"name":"test-disk-0",` +
+						`"annotations":{"harvesterhci.io/imageId":"default/image"}},` +
+						`"spec":{"accessModes":["ReadWriteMany"],"resources":{"requests":{"storage":"10Gi"}}` +
+						`,"volumeMode":"Block","storageClassName":"longhorn"}}]`,
+				},
+			},
+			newSpec:       nil,
+			expectedError: true,
 		},
 		{
-			name:        "CPU pinning enabled, one CPU Manager enabled, returns success",
-			vm:          vm0,
-			nodes:       []*corev1.Node{node0, node1},
-			expectError: false,
+			name:  "annotation removed resulting in success",
+			oldVM: templateVM.DeepCopy(),
+			newVM: templateVM.DeepCopy(),
+			newObjMeta: &metav1.ObjectMeta{
+				Name:      templateVM.Name,
+				Namespace: templateVM.Namespace,
+			},
+			newSpec:       nil,
+			expectedError: false,
 		},
 		{
-			name:        "CPU pinning enabled, w/o CPU Manager enabled, returns error [1]",
-			vm:          vm0,
-			nodes:       []*corev1.Node{node1, node2},
-			expectError: true,
+			name:  "annotation added resulting in success",
+			oldVM: templateVM.DeepCopy(),
+			newVM: templateVM.DeepCopy(),
+			newObjMeta: &metav1.ObjectMeta{
+				Name:      templateVM.Name,
+				Namespace: templateVM.Namespace,
+				Annotations: map[string]string{
+					"harvesterhci.io/volumeClaimTemplates": `[{"metadata":{"name":"test-disk-0"` +
+						`,"annotations":{"harvesterhci.io/imageId":"default/image"}},"spec":{"accessModes"` +
+						`:["ReadWriteMany"],"resources":{"requests":{"storage":"10Gi"}},"volumeMode":` +
+						`"Block","storageClassName":"longhorn-image"}},{"metadata":{"name":"test-disk-1",` +
+						`"annotations":{"harvesterhci.io/imageId":"default/image"}},"spec":{"accessModes":` +
+						`["ReadWriteMany"],"resources":{"requests":{"storage":"10Gi"}},"volumeMode":` +
+						`"Block","storageClassName":"longhorn"}}]`,
+				},
+			},
+			newSpec:       nil,
+			expectedError: false,
 		},
 		{
-			name:        "CPU pinning enabled, w/o CPU Manager enabled, returns error [2]",
-			vm:          vm0,
-			nodes:       []*corev1.Node{node2},
-			expectError: true,
+			name:  "annotations with bad json are rejected",
+			oldVM: templateVM.DeepCopy(),
+			newVM: templateVM.DeepCopy(),
+			newObjMeta: &metav1.ObjectMeta{
+				Name:      templateVM.Name,
+				Namespace: templateVM.Namespace,
+				Annotations: map[string]string{
+					"harvesterhci.io/volumeClaimTemplates": `[{"]`,
+				},
+			},
+			newSpec:       nil,
+			expectedError: true,
 		},
 		{
-			name:        "CPU pinning disabled, one CPU Manager enabled, returns success",
-			vm:          vm1,
-			nodes:       []*corev1.Node{node0},
-			expectError: false,
+			name:  "empty annotation is allowed on both objects",
+			oldVM: templateVM.DeepCopy(),
+			newVM: templateVM.DeepCopy(),
+			oldObjMeta: &metav1.ObjectMeta{
+				Name:      templateVM.Name,
+				Namespace: templateVM.Namespace,
+				Annotations: map[string]string{
+					"harvesterhci.io/volumeClaimTemplates": "",
+				},
+			},
+			newObjMeta: &metav1.ObjectMeta{
+				Name:      templateVM.Name,
+				Namespace: templateVM.Namespace,
+				Annotations: map[string]string{
+					"harvesterhci.io/volumeClaimTemplates": "",
+				},
+			},
+			newSpec:       nil,
+			expectedError: false,
 		},
 		{
-			name:        "CPU pinning disabled, w/o CPU Manager enabled, returns success",
-			vm:          vm2,
-			nodes:       []*corev1.Node{node1, node2},
-			expectError: false,
+			name:  "nil storage class name is handled properly",
+			oldVM: templateVM.DeepCopy(),
+			newVM: templateVM.DeepCopy(),
+			newObjMeta: &metav1.ObjectMeta{
+				Name:      templateVM.Name,
+				Namespace: templateVM.Namespace,
+				Annotations: map[string]string{
+					"harvesterhci.io/volumeClaimTemplates": `[{"metadata":{"name":"test-disk-0"` +
+						`,"annotations":{"harvesterhci.io/imageId":"default/image"}},"spec":{"accessModes"` +
+						`:["ReadWriteMany"],"resources":{"requests":{"storage":"10Gi"}},"volumeMode":` +
+						`"Block"}},{"metadata":{"name":"test-disk-1",` +
+						`"annotations":{"harvesterhci.io/imageId":"default/image"}},"spec":{"accessModes":` +
+						`["ReadWriteMany"],"resources":{"requests":{"storage":"10Gi"}},"volumeMode":` +
+						`"Block"}}]`,
+				},
+			},
+			newSpec:       nil,
+			expectedError: false,
 		},
 	}
 
-	for _, tc := range tests {
-		k8sclientset := k8sfake.NewSimpleClientset()
+	corefakeclientset := corefake.NewClientset()
+	err := corefakeclientset.Tracker().Add(&corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		Name: templateVM.Namespace,
+	}})
+	assert.NoError(t, err)
+	fakeNSCache := fakeclients.NamespaceCache(corefakeclientset.CoreV1().Namespaces)
+	validator := NewValidator(fakeNSCache, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil).(*vmValidator)
 
-		fakeNodeCache := fakeclients.NodeCache(k8sclientset.CoreV1().Nodes)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.oldObjMeta != nil {
+				test.oldVM.ObjectMeta = *test.oldObjMeta
+			}
+			if test.newObjMeta != nil {
+				test.newVM.ObjectMeta = *test.newObjMeta
+			}
+			if test.newSpec != nil {
+				test.newVM.Spec = *test.newSpec
+			}
+			err := validator.Update(nil, test.oldVM, test.newVM)
 
-		for _, node := range tc.nodes {
-			err := k8sclientset.Tracker().Add(node)
-			assert.Nil(t, err, "mock resource should add into k8s fake controller tracker")
-		}
-
-		validator := NewValidator(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, fakeNodeCache).(*vmValidator)
-
-		t.Run(tc.name, func(t *testing.T) {
-			err := validator.checkDedicatedCPUPlacement(tc.vm)
-			if tc.expectError {
-				assert.NotNil(t, err, tc.name)
+			if test.expectedError {
+				assert.Error(t, err)
 			} else {
-				assert.Nil(t, err, tc.name)
+				assert.NoError(t, err)
 			}
 		})
 	}

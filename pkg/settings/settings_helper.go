@@ -171,8 +171,10 @@ type ImagePreloadOption struct {
 type UpgradeConfig struct {
 	// Options for the Image Preload phase of Harvester Upgrade
 	PreloadOption ImagePreloadOption `json:"imagePreloadOption,omitempty"`
-	// set true to restore vm to the pre-upgrade state, this option only works under single node.
+	// set true to restore vm to the pre-upgrade state
 	RestoreVM bool `json:"restoreVM,omitempty"`
+	// LogReadyTimeout is the time in minutes to wait for LogReady condition to be set True or False.
+	LogReadyTimeout string `json:"logReadyTimeout,omitempty"`
 }
 
 func DecodeConfig[T any](value string) (*T, error) {

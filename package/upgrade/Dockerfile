@@ -1,4 +1,7 @@
-FROM registry.suse.com/bci/bci-base:15.6
+ARG HARVESTER_INSTALLER_REF=master-head
+FROM registry.opensuse.org/isv/rancher/harvester/os/dev/main/baseos:latest as baseos
+FROM rancher/harvester-installer:${HARVESTER_INSTALLER_REF} as installer
+FROM registry.suse.com/bci/bci-base:15.7
 
 ARG ARCH=amd64
 ENV ARCH=${ARCH}
@@ -13,7 +16,10 @@ RUN curl -sfL https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/${ARCH}/kub
 RUN curl -sfL https://github.com/kubevirt/kubevirt/releases/download/v1.4.0/virtctl-v1.4.0-linux-${ARCH} -o /usr/bin/virtctl && chmod +x /usr/bin/virtctl && \
     curl -sfL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH} -o /usr/bin/yq && chmod +x /usr/bin/yq && \
     curl -sfL https://github.com/rancher/wharfie/releases/download/v0.6.8/wharfie-${ARCH}  -o /usr/bin/wharfie && chmod +x /usr/bin/wharfie
-
+# Copy elemental binary to be used for upgrades
+COPY --from=baseos /usr/bin/elemental /usr/local/bin/elemental
+# Copy harvester-installer binary to be used to generate networkmanager config
+COPY --from=installer /usr/bin/harvester-installer /usr/local/bin/harvester-installer
 COPY do_upgrade_node.sh /usr/local/bin/
 COPY upgrade_node.sh /usr/local/bin/
 COPY upgrade_manifests.sh /usr/local/bin/

@@ -31,7 +31,8 @@ func GetAdditionalGuestMemoryOverheadRatioWithoutError(settingCache ctlharvester
 		return &value
 	}
 	if agmorc.IsEmpty() {
-		return nil
+		value = settings.AdditionalGuestMemoryOverheadRatioDefault
+		return &value
 	}
 	value = agmorc.Value()
 	return &value
@@ -61,8 +62,21 @@ func GetAdditionalGuestMemoryOverheadRatio(settingCache ctlharvesterv1.SettingCa
 	return &value, nil
 }
 
-func IsRestoreVM() (bool, error) {
-	upgradeConfig, err := settings.DecodeConfig[settings.UpgradeConfig](settings.UpgradeConfigSet.Get())
+func IsRestoreVM(settingCache ctlharvesterv1.SettingCache) (bool, error) {
+	value := ""
+	if settingCache == nil {
+		return false, fmt.Errorf("the settingCache is empty, can't get the setting")
+	}
+	s, err := settingCache.Get(settings.UpgradeConfigSettingName)
+	if err != nil {
+		return false, err
+	}
+	value = s.Value
+	if value == "" {
+		value = s.Default
+	}
+
+	upgradeConfig, err := settings.DecodeConfig[settings.UpgradeConfig](value)
 	if err != nil || upgradeConfig == nil {
 		return false, err
 	}
