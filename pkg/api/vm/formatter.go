@@ -41,6 +41,9 @@ const (
 	createTemplate                   = "createTemplate"
 	addVolume                        = "addVolume"
 	removeVolume                     = "removeVolume"
+	addNic                           = "addNic"
+	removeNic                        = "removeNic"
+	findHotunpluggableNics           = "findHotunpluggableNics"
 	cloneVM                          = "clone"
 	forceStopVM                      = "forceStop"
 	dismissInsufficientResourceQuota = "dismissInsufficientResourceQuota"
@@ -51,6 +54,7 @@ const (
 
 type vmformatter struct {
 	vmiCache      ctlkubevirtv1.VirtualMachineInstanceCache
+	vmCache       ctlkubevirtv1.VirtualMachineCache
 	pvcCache      ctlcorev1.PersistentVolumeClaimCache
 	nodeCache     ctlcorev1.NodeCache
 	scCache       ctlstoragev1.StorageClassCache
@@ -122,6 +126,15 @@ func (vf *vmformatter) formatter(request *types.APIRequest, resource *types.RawR
 
 		if canCPUAndMemoryHotplug(vm) {
 			resource.AddAction(request, cpuAndMemoryHotplug)
+		}
+
+		if canHotplugNic(vm) {
+			resource.AddAction(request, addNic)
+		}
+
+		if canHotUnplugNic(vm) {
+			resource.AddAction(request, removeNic)
+			resource.AddAction(request, findHotunpluggableNics)
 		}
 	}
 
@@ -461,4 +474,14 @@ func canCPUAndMemoryHotplug(vm *kubevirtv1.VirtualMachine) bool {
 		}
 	}
 	return !hasRestartRequiredOrHotplugMigration
+}
+
+func canHotplugNic(vm *kubevirtv1.VirtualMachine) bool {
+	ok, _ := virtualmachine.SupportHotplugNic(vm)
+	return ok
+}
+
+func canHotUnplugNic(vm *kubevirtv1.VirtualMachine) bool {
+	ok, _ := virtualmachine.SupportHotUnplugNic(vm)
+	return ok
 }

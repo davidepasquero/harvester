@@ -486,12 +486,12 @@ github.com/k3s-io/helm-controller/pkg/apis/helm.cattle.io
 github.com/k3s-io/helm-controller/pkg/apis/helm.cattle.io/v1
 github.com/k3s-io/helm-controller/pkg/generated/controllers/helm.cattle.io
 github.com/k3s-io/helm-controller/pkg/generated/controllers/helm.cattle.io/v1
-# github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.5
+# github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.6
 ## explicit; go 1.21
 github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io
 github.com/k8snetworkplumbingwg/network-attachment-definition-client/pkg/apis/k8s.cni.cncf.io/v1
-# github.com/k8snetworkplumbingwg/whereabouts v0.8.0
-## explicit; go 1.21
+# github.com/k8snetworkplumbingwg/whereabouts v0.9.2
+## explicit; go 1.24
 github.com/k8snetworkplumbingwg/whereabouts/pkg/api/whereabouts.cni.cncf.io
 github.com/k8snetworkplumbingwg/whereabouts/pkg/api/whereabouts.cni.cncf.io/v1alpha1
 # github.com/klauspost/compress v1.18.0
@@ -1358,7 +1358,7 @@ golang.org/x/text/secure/bidirule
 golang.org/x/text/transform
 golang.org/x/text/unicode/bidi
 golang.org/x/text/unicode/norm
-# golang.org/x/time v0.11.0
+# golang.org/x/time v0.12.0
 ## explicit; go 1.23.0
 golang.org/x/time/rate
 # golang.org/x/tools v0.34.0
@@ -2376,7 +2376,6 @@ k8s.io/utils/net
 k8s.io/utils/path
 k8s.io/utils/pointer
 k8s.io/utils/ptr
-k8s.io/utils/set
 k8s.io/utils/trace
 # kubevirt.io/api v1.6.0
 ## explicit; go 1.23.0
@@ -2434,8 +2433,8 @@ kubevirt.io/client-go/prometheusoperator/typed/monitoring/v1
 kubevirt.io/client-go/subresources
 kubevirt.io/client-go/util
 kubevirt.io/client-go/version
-# kubevirt.io/containerized-data-importer v1.61.0
-## explicit; go 1.22.0
+# kubevirt.io/containerized-data-importer v1.62.0
+## explicit; go 1.23.0
 kubevirt.io/containerized-data-importer/pkg/client/clientset/versioned/scheme
 kubevirt.io/containerized-data-importer/pkg/common
 kubevirt.io/containerized-data-importer/pkg/controller/common
@@ -2443,8 +2442,8 @@ kubevirt.io/containerized-data-importer/pkg/feature-gates
 kubevirt.io/containerized-data-importer/pkg/storagecapabilities
 kubevirt.io/containerized-data-importer/pkg/token
 kubevirt.io/containerized-data-importer/pkg/util
-# kubevirt.io/containerized-data-importer-api v1.61.0
-## explicit; go 1.22.0
+# kubevirt.io/containerized-data-importer-api v1.62.0
+## explicit; go 1.23.0
 kubevirt.io/containerized-data-importer-api/pkg/apis/core
 kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1alpha1
 kubevirt.io/containerized-data-importer-api/pkg/apis/core/v1beta1

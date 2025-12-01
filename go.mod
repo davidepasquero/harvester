@@ -69,6 +69,7 @@ replace (
 
 require (
 	github.com/cisco-open/operator-tools v0.37.0
+	github.com/containernetworking/cni v1.3.0
 	github.com/deckarep/golang-set/v2 v2.6.0
 	github.com/ehazlett/simplelog v0.0.0-20200226020431-d374894e92a4
 	github.com/emicklei/go-restful/v3 v3.12.2
@@ -81,8 +82,8 @@ require (
 	github.com/harvester/node-manager v1.6.0-rc3
 	github.com/iancoleman/strcase v0.2.0
 	github.com/k3s-io/helm-controller v0.16.1
-	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.5
-	github.com/k8snetworkplumbingwg/whereabouts v0.8.0
+	github.com/k8snetworkplumbingwg/network-attachment-definition-client v1.7.6
+	github.com/k8snetworkplumbingwg/whereabouts v0.9.2
 	github.com/kube-logging/logging-operator/pkg/sdk v0.12.0
 	github.com/kubernetes-csi/external-snapshotter/client/v4 v4.2.0
 	github.com/kubernetes/dashboard v1.10.1
@@ -134,8 +135,8 @@ require (
 	k8s.io/utils v0.0.0-20250604170112-4c0f3b243397
 	kubevirt.io/api v1.6.0
 	kubevirt.io/client-go v1.6.0
-	kubevirt.io/containerized-data-importer v1.61.0
-	kubevirt.io/containerized-data-importer-api v1.61.0
+	kubevirt.io/containerized-data-importer v1.62.0
+	kubevirt.io/containerized-data-importer-api v1.62.0
 	kubevirt.io/kubevirt v1.6.0
 	sigs.k8s.io/cluster-api v1.9.5
 	sigs.k8s.io/controller-runtime v0.20.4
@@ -173,7 +174,6 @@ require (
 	github.com/containerd/errdefs v0.3.0 // indirect
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/platforms v0.2.1 // indirect
-	github.com/containernetworking/cni v1.3.0 // indirect
 	github.com/coreos/go-semver v0.3.1 // indirect
 	github.com/coreos/go-systemd/v22 v22.5.0 // indirect
 	github.com/cpuguy83/go-md2man/v2 v2.0.6 // indirect
@@ -336,7 +336,7 @@ require (
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sys v0.34.0 // indirect
 	golang.org/x/term v0.33.0 // indirect
-	golang.org/x/time v0.11.0 // indirect
+	golang.org/x/time v0.12.0 // indirect
 	golang.org/x/tools v0.34.0 // indirect
 	gomodules.xyz/jsonpatch/v2 v2.5.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20250519155744-55703ea1f237 // indirect
